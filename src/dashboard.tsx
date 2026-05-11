@@ -1,56 +1,156 @@
-import { useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { toast } from "sonner";
 import { Toaster } from "@/components/ui/sonner";
+import { supabase } from "@/lib/supabase";
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
-type Stream = "PP1" | "PP2" | "Class 1" | "Class 2" | "Class 3" | "Class 4" | "Class 5" | "Class 6" | "Class 7";
-const STREAMS: Stream[] = ["PP1", "PP2", "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7"];
+type Stream =
+  | "PP1" | "PP2"
+  | "Class 1" | "Class 2" | "Class 3" | "Class 4" | "Class 5" | "Class 6" | "Class 7";
+
+const STREAMS: Stream[] = [
+  "PP1", "PP2",
+  "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7",
+];
+
 type TermFees = Record<Stream, number>;
 
-const DEFAULT_FEES: TermFees = {
-  "PP1": 12000, "PP2": 12000,
-  "Class 1": 15000, "Class 2": 15000, "Class 3": 15000,
-  "Class 4": 18000, "Class 5": 18000, "Class 6": 18000,
-  "Class 7": 20000,
+type Student = {
+  id: string;
+  name: string;
+  stream: Stream;
+  guardian?: string;
+  expectedFees: number;
 };
 
-type Student = { id: string; name: string; stream: Stream; guardian?: string; expectedFees: number };
 type PaymentMethod = "Bank Transfer" | "Cash";
-type Transaction = { id: string; date: string; studentId: string; amount: number; method: PaymentMethod; reference?: string; receivedBy: string; notes?: string };
-type Unallocated = { id: string; date: string; amount: number; method: PaymentMethod; reference?: string; depositorName?: string; reason: string };
 
-// ─── Seed data ─────────────────────────────────────────────────────────────────
-const seedStudents: Student[] = [
-  { id: "s1",  name: "Amani Wanjiku",    stream: "PP1",     guardian: "Grace Wanjiku",  expectedFees: DEFAULT_FEES["PP1"] },
-  { id: "s2",  name: "Brian Otieno",     stream: "PP2",     guardian: "Peter Otieno",   expectedFees: DEFAULT_FEES["PP2"] },
-  { id: "s3",  name: "Cynthia Achieng",  stream: "Class 1", guardian: "Mary Achieng",   expectedFees: DEFAULT_FEES["Class 1"] },
-  { id: "s4",  name: "Daniel Kiprop",    stream: "Class 2",                             expectedFees: DEFAULT_FEES["Class 2"] },
-  { id: "s5",  name: "Esther Naliaka",   stream: "Class 3", guardian: "Rose Naliaka",   expectedFees: DEFAULT_FEES["Class 3"] },
-  { id: "s6",  name: "Felix Mwangi",     stream: "Class 4",                             expectedFees: DEFAULT_FEES["Class 4"] },
-  { id: "s7",  name: "Gloria Wambui",    stream: "Class 5", guardian: "Samuel Wambui",  expectedFees: DEFAULT_FEES["Class 5"] },
-  { id: "s8",  name: "Henry Barasa",     stream: "Class 6",                             expectedFees: DEFAULT_FEES["Class 6"] },
-  { id: "s9",  name: "Immaculate Njeri", stream: "Class 7", guardian: "Patrick Njeri",  expectedFees: DEFAULT_FEES["Class 7"] },
-  { id: "s10", name: "James Kamau",      stream: "Class 1", guardian: "Lucy Kamau",     expectedFees: DEFAULT_FEES["Class 1"] },
-];
+type Transaction = {
+  id: string;
+  date: string;
+  studentId: string;
+  amount: number;
+  method: PaymentMethod;
+  reference?: string;
+  receivedBy: string;
+  notes?: string;
+};
 
-const seedTransactions: Transaction[] = [
-  { id: "t1", date: "2026-04-12", studentId: "s1",  amount: 8000,  method: "Bank Transfer", reference: "BNK-883421", receivedBy: "Bursar" },
-  { id: "t2", date: "2026-04-15", studentId: "s3",  amount: 15000, method: "Cash",          receivedBy: "Bursar",    notes: "Cleared term 1" },
-  { id: "t3", date: "2026-04-18", studentId: "s5",  amount: 10000, method: "Bank Transfer", reference: "BNK-884019", receivedBy: "Accountant" },
-  { id: "t4", date: "2026-04-22", studentId: "s7",  amount: 18000, method: "Cash",          receivedBy: "Bursar" },
-  { id: "t5", date: "2026-04-29", studentId: "s9",  amount: 12000, method: "Bank Transfer", reference: "BNK-885550", receivedBy: "Accountant" },
-  { id: "t6", date: "2026-05-02", studentId: "s4",  amount: 7500,  method: "Cash",          receivedBy: "Bursar" },
-  { id: "t7", date: "2026-05-04", studentId: "s8",  amount: 18000, method: "Bank Transfer", reference: "BNK-886112", receivedBy: "Accountant" },
-];
+type Unallocated = {
+  id: string;
+  date: string;
+  amount: number;
+  method: PaymentMethod;
+  reference?: string;
+  depositorName?: string;
+  reason: string;
+};
 
-const seedUnallocated: Unallocated[] = [
-  { id: "u1", date: "2026-04-20", amount: 9000, method: "Bank Transfer", reference: "BNK-884201", depositorName: "Unknown depositor", reason: "Student name not indicated on slip" },
-  { id: "u2", date: "2026-05-01", amount: 5000, method: "Bank Transfer", reference: "BNK-885888", depositorName: "M. Otieno", reason: "Deposit slip unreadable" },
-];
+// ─── Row <-> domain mappers (snake_case <-> camelCase) ────────────────────────
+// Matches actual Supabase schema:
+//   students        → id, full_name, class_id, guardian, is_active, notes
+//   classes         → id, name (= Stream), sort_order, term_fees (jsonb)
+//   student_term_fees → id, student_id, term_id, expected_fee
+//   transactions    → id, student_id, term_id, payment_date, amount, method, reference, received_by, notes
+//   unallocated_funds → id, term_id, deposit_date, amount, method, reference, depositor_name, reason, resolved
+type StudentRow = {
+  id: string;
+  full_name: string;
+  class_id: string;
+  guardian: string | null;
+  // Supabase returns a single object for many-to-one joins (class_id -> classes)
+  // We also select term_fees jsonb from classes as the authoritative fee source
+  classes: { name: string; term_fees: Record<string, number> | null } | { name: string; term_fees: Record<string, number> | null }[] | null;
+  student_term_fees: Array<{ expected_fee: number; term_id?: string }> | null;
+};
+type TransactionRow = {
+  id: string;
+  payment_date: string;
+  student_id: string;
+  amount: number;
+  method: PaymentMethod;
+  reference: string | null;
+  received_by: string;
+  notes: string | null;
+};
+type UnallocatedRow = {
+  id: string;
+  deposit_date: string;
+  amount: number;
+  method: PaymentMethod;
+  reference: string | null;
+  depositor_name: string | null;
+  reason: string;
+};
 
+const studentFromRow = (r: StudentRow, termKey?: string): Student => {
+  // Supabase may return classes as an array (one-to-many inference) or object (many-to-one)
+  const classesObj = Array.isArray(r.classes) ? r.classes[0] : r.classes;
+
+  // PRIMARY source: classes.term_fees jsonb keyed by term number ("1" or "2")
+  // This is always set per class and is the source of truth for the base fee.
+  const key = termKey ?? String(CURRENT_TERM.number);
+  const baseFeeFromClass = Number(classesObj?.term_fees?.[key] ?? 0);
+
+  // OVERRIDE: if a student_term_fees row exists for this term, it takes precedence
+  // (allows per-student fee adjustments e.g. bursaries or scholarships)
+  const stfFee = r.student_term_fees?.[0]?.expected_fee;
+  const expectedFees = stfFee != null ? stfFee : baseFeeFromClass;
+
+  return {
+    id: r.id,
+    name: r.full_name,
+    stream: (classesObj?.name ?? "") as Stream,
+    guardian: r.guardian ?? undefined,
+    expectedFees,
+  };
+};
+const txFromRow = (r: TransactionRow): Transaction => ({
+  id: r.id,
+  date: r.payment_date,
+  studentId: r.student_id,
+  amount: r.amount,
+  method: r.method,
+  reference: r.reference ?? undefined,
+  receivedBy: r.received_by,
+  notes: r.notes ?? undefined,
+});
+const unallocFromRow = (r: UnallocatedRow): Unallocated => ({
+  id: r.id,
+  date: r.deposit_date,
+  amount: r.amount,
+  method: r.method,
+  reference: r.reference ?? undefined,
+  depositorName: r.depositor_name ?? undefined,
+  reason: r.reason,
+});
+
+// ─── Helpers ───────────────────────────────────────────────────────────────────
 const fmt = (n: number) =>
-  new Intl.NumberFormat("en-KE", { style: "currency", currency: "KES", maximumFractionDigits: 0 }).format(n);
-const uid = (p: string) => `${p}${Date.now()}${Math.random().toString(36).slice(2, 6)}`;
+  new Intl.NumberFormat("en-TZ", { style: "currency", currency: "TZS", maximumFractionDigits: 0 }).format(n);
+
+const EMPTY_FEES: TermFees = STREAMS.reduce((acc, s) => {
+  acc[s] = 0;
+  return acc;
+}, {} as TermFees);
+
+// ─── Term helpers ─────────────────────────────────────────────────────────────
+// Two terms per year:
+//   Term 1 → January  1 – June  30
+//   Term 2 → July     1 – November 30
+type TermLabel = { number: 1 | 2; year: number; label: string; start: string; end: string };
+
+function getCurrentTerm(): TermLabel {
+  const now   = new Date();
+  const month = now.getMonth() + 1; // 1-based
+  const year  = now.getFullYear();
+  if (month >= 1 && month <= 6) {
+    return { number: 1, year, label: `Term 1 · ${year}`, start: `${year}-01-01`, end: `${year}-06-30` };
+  }
+  return { number: 2, year, label: `Term 2 · ${year}`, start: `${year}-07-01`, end: `${year}-11-30` };
+}
+
+const CURRENT_TERM = getCurrentTerm();
 
 type Page = "overview" | "transactions" | "unallocated" | { type: "class"; stream: Stream };
 
@@ -58,61 +158,363 @@ type Page = "overview" | "transactions" | "unallocated" | { type: "class"; strea
 // ROOT
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function Dashboard() {
-  const [termFees, setTermFees]         = useState<TermFees>(DEFAULT_FEES);
-  const [students, setStudents]         = useState<Student[]>(seedStudents);
-  const [transactions, setTransactions] = useState<Transaction[]>(seedTransactions);
-  const [unallocated, setUnallocated]   = useState<Unallocated[]>(seedUnallocated);
+  const [termFees, setTermFees]         = useState<TermFees>(EMPTY_FEES);
+  const [students, setStudents]         = useState<Student[]>([]);
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [unallocated, setUnallocated]   = useState<Unallocated[]>([]);
+  const [loading, setLoading]           = useState(true);
   const [page, setPage]                 = useState<Page>("overview");
   const [receiptTx, setReceiptTx]       = useState<Transaction | null>(null);
   const [sidebarOpen, setSidebarOpen]   = useState(false);
 
-  const studentLookup = useMemo(() => Object.fromEntries(students.map(s => [s.id, s])), [students]);
+  // ── Initial load from Supabase ───────────────────────────────────────────────
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      setLoading(true);
+      try {
+        // 1. Resolve the active term — match by term_number + year for the current calendar term
+        //    Falls back to is_active if no exact match exists yet
+        const { data: termData, error: termErr } = await supabase
+          .from("terms")
+          .select("id, term_number, year")
+          .eq("term_number", CURRENT_TERM.number)
+          .eq("year", CURRENT_TERM.year)
+          .maybeSingle();
+        if (termErr) throw termErr;
+        const termId: string | null = (termData as { id: string; term_number: number; year: number } | null)?.id ?? null;
+
+        // 2. Parallel fetch with corrected table / column names
+        const [classesRes, studentsRes, txsRes, unallocRes] = await Promise.all([
+          // classes.term_fees is a jsonb map keyed by term number
+          supabase
+            .from("classes")
+            .select("id, name, term_fees")
+            .order("sort_order"),
+
+          // students: full_name (not name), join classes for stream, join student_term_fees for expected fee
+          supabase
+            .from("students")
+            .select("id, full_name, class_id, guardian, classes(name, term_fees), student_term_fees(expected_fee, term_id)")
+            .eq("is_active", true)
+            .order("full_name"),
+
+          // transactions: payment_date, scoped to active term date range
+          supabase
+            .from("transactions")
+            .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
+            .gte("payment_date", CURRENT_TERM.start)
+            .lte("payment_date", CURRENT_TERM.end)
+            .order("payment_date", { ascending: false }),
+
+          // unallocated_funds (not "unallocated"), deposit_date (not date), only unresolved
+          supabase
+            .from("unallocated_funds")
+            .select("id, deposit_date, amount, method, reference, depositor_name, reason")
+            .eq("resolved", false)
+            .order("deposit_date", { ascending: false }),
+        ]);
+
+        if (cancelled) return;
+
+        if (classesRes.error) throw classesRes.error;
+        if (studentsRes.error) throw studentsRes.error;
+        if (txsRes.error) throw txsRes.error;
+        if (unallocRes.error) throw unallocRes.error;
+
+        // Build termFees from classes.term_fees jsonb, keyed by active term number
+        if (classesRes.data && Array.isArray(classesRes.data)) {
+          const termKey = String(CURRENT_TERM.number);
+          const fees: TermFees = { ...EMPTY_FEES };
+          for (const row of classesRes.data as Array<{ id: string; name: string; term_fees: Record<string, number> | null }>) {
+            if ((STREAMS as string[]).includes(row.name)) {
+              fees[row.name as Stream] = Number(row.term_fees?.[termKey] ?? 0);
+            }
+          }
+          setTermFees(fees);
+        }
+
+        // Filter student_term_fees to the active term when joining (Supabase returns all rows by default)
+        const rawStudents = (studentsRes.data ?? []) as Array<StudentRow & {
+          student_term_fees: Array<{ expected_fee: number; term_id?: string }> | null;
+        }>;
+        const filteredStudents = rawStudents.map(s => ({
+          ...s,
+          student_term_fees: termId
+            ? (s.student_term_fees ?? []).filter((f: { term_id?: string }) => f.term_id === termId)
+            : (s.student_term_fees ?? []),
+        }));
+        const termKey = String(CURRENT_TERM.number);
+        setStudents(filteredStudents.map(s => studentFromRow(s as StudentRow, termKey)));
+        setTransactions((txsRes.data ?? []).map(r => txFromRow(r as TransactionRow)));
+        setUnallocated((unallocRes.data ?? []).map(r => unallocFromRow(r as UnallocatedRow)));
+      } catch (err) {
+        console.error("Failed to load dashboard data:", err);
+        toast.error("Failed to load data. Please refresh.");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, []);
+
+  const studentLookup = useMemo(
+    () => Object.fromEntries(students.map(s => [s.id, s])),
+    [students],
+  );
 
   const totals = useMemo(() => {
     const expected  = students.reduce((a, s) => a + s.expectedFees, 0);
     const collected = transactions.reduce((a, t) => a + t.amount, 0);
-    return { expected, collected, debt: Math.max(0, expected - collected), unallocatedAmt: unallocated.reduce((a, u) => a + u.amount, 0) };
+    return {
+      expected,
+      collected,
+      debt: Math.max(0, expected - collected),
+      unallocatedAmt: unallocated.reduce((a, u) => a + u.amount, 0),
+    };
   }, [students, transactions, unallocated]);
 
   const streamStats = useMemo(() => STREAMS.map(stream => {
     const ss = students.filter(s => s.stream === stream);
     const exp = ss.reduce((a, s) => a + s.expectedFees, 0);
-    const col = transactions.filter(t => ss.some(s => s.id === t.studentId)).reduce((a, t) => a + t.amount, 0);
+    const col = transactions
+      .filter(t => ss.some(s => s.id === t.studentId))
+      .reduce((a, t) => a + t.amount, 0);
     return { stream, count: ss.length, expected: exp, collected: col, debt: Math.max(0, exp - col) };
   }), [students, transactions]);
 
-  // ── Mutators ────────────────────────────────────────────────────────────────
-  const addStudent    = (s: Omit<Student, "id" | "expectedFees">) => {
-    setStudents(p => [...p, { ...s, id: uid("s"), expectedFees: termFees[s.stream] }]);
-    toast.success(`${s.name} enrolled in ${s.stream}`);
+  // ── Mutators (Supabase-backed) ──────────────────────────────────────────────
+  // addStudents accepts one or many students — used by both single-add and bulk-add modals
+  const addStudents = async (newStudents: Array<Omit<Student, "id" | "expectedFees">>) => {
+    if (newStudents.length === 0) return;
+
+    // Group by stream so we only fetch each class once
+    const streamSet = [...new Set(newStudents.map(s => s.stream))];
+    const { data: classRows, error: classErr } = await supabase
+      .from("classes")
+      .select("id, name, term_fees")
+      .in("name", streamSet);
+    if (classErr) { toast.error(classErr.message); return; }
+
+    const classMap = Object.fromEntries(
+      (classRows ?? []).map((r: { id: string; name: string; term_fees: Record<string, number> | null }) => [r.name, r])
+    );
+
+    // Build insert payload
+    const insertRows = newStudents.map(s => {
+      const cls = classMap[s.stream];
+      if (!cls) throw new Error(`Class "${s.stream}" not found`);
+      return { full_name: s.name, class_id: cls.id, guardian: s.guardian ?? null };
+    });
+
+    const { data, error } = await supabase
+      .from("students")
+      .insert(insertRows)
+      .select("id, full_name, class_id, guardian, classes(name, term_fees), student_term_fees(expected_fee, term_id)");
+    if (error) { toast.error(error.message); return; }
+
+    const termKey = String(CURRENT_TERM.number);
+    const added = (data ?? []).map(r => studentFromRow(r as unknown as StudentRow, termKey));
+    setStudents(p => [...p, ...added]);
+    toast.success(added.length === 1 ? `${added[0].name} enrolled` : `${added.length} students enrolled`);
   };
-  const editStudent   = (s: Student) => { setStudents(p => p.map(x => x.id === s.id ? s : x)); toast.success("Student updated"); };
-  const removeStudent = (id: string) => { setStudents(p => p.filter(s => s.id !== id)); toast.success("Student removed"); };
-  const moveStudent   = (id: string, to: Stream) => {
-    setStudents(p => p.map(s => s.id === id ? { ...s, stream: to, expectedFees: termFees[to] } : s));
+
+  // Convenience wrapper for single-student add (keeps existing call sites working)
+  const addStudent = (s: Omit<Student, "id" | "expectedFees">) => addStudents([s]);
+
+  const editStudent = async (s: Student) => {
+    // Look up class id from stream name
+    const { data: classRow, error: classErr } = await supabase
+      .from("classes")
+      .select("id")
+      .eq("name", s.stream)
+      .maybeSingle();
+    if (classErr) { toast.error(classErr.message); return; }
+    if (!classRow) { toast.error(`Class "${s.stream}" not found`); return; }
+
+    const { data, error } = await supabase
+      .from("students")
+      .update({ full_name: s.name, class_id: classRow.id, guardian: s.guardian ?? null })
+      .eq("id", s.id)
+      .select("id, full_name, class_id, guardian, classes(name, term_fees), student_term_fees(expected_fee, term_id)")
+      .single();
+    if (error) { toast.error(error.message); return; }
+    setStudents(p => p.map(x => x.id === s.id ? studentFromRow(data as unknown as StudentRow, String(CURRENT_TERM.number)) : x));
+    toast.success("Student updated");
+  };
+
+  const removeStudent = async (id: string) => {
+    const { error } = await supabase.from("students").delete().eq("id", id);
+    if (error) { toast.error(error.message); return; }
+    setStudents(p => p.filter(s => s.id !== id));
+    toast.success("Student removed");
+  };
+
+  const moveStudent = async (id: string, to: Stream) => {
+    const { data: classRow, error: classErr } = await supabase
+      .from("classes")
+      .select("id")
+      .eq("name", to)
+      .maybeSingle();
+    if (classErr) { toast.error(classErr.message); return; }
+    if (!classRow) { toast.error(`Class "${to}" not found`); return; }
+
+    const { data, error } = await supabase
+      .from("students")
+      .update({ class_id: classRow.id })
+      .eq("id", id)
+      .select("id, full_name, class_id, guardian, classes(name, term_fees), student_term_fees(expected_fee, term_id)")
+      .single();
+    if (error) { toast.error(error.message); return; }
+    setStudents(p => p.map(s => s.id === id ? studentFromRow(data as unknown as StudentRow, String(CURRENT_TERM.number)) : s));
     toast.success("Student moved to " + to);
   };
-  const updateFee     = (stream: Stream, amt: number) => {
+
+  const updateFee = async (stream: Stream, amt: number) => {
+    // Fetch the specific class row by name
+    const { data: classRow, error: fetchErr } = await supabase
+      .from("classes")
+      .select("id, term_fees")
+      .eq("name", stream)
+      .maybeSingle();
+    if (fetchErr) { toast.error(fetchErr.message); return; }
+    if (!classRow) { toast.error(`Class "${stream}" not found`); return; }
+
+    // Resolve active term by current calendar term (number + year)
+    const { data: activeTerm } = await supabase
+      .from("terms")
+      .select("id")
+      .eq("term_number", CURRENT_TERM.number)
+      .eq("year", CURRENT_TERM.year)
+      .maybeSingle();
+    const termId: string | null = (activeTerm as { id: string } | null)?.id ?? null;
+    const termKey = String(CURRENT_TERM.number);
+
+    // Update term_fees jsonb in classes
+    const currentFees = (classRow.term_fees ?? {}) as Record<string, number>;
+    const newTermFees = { ...currentFees, [termKey]: amt };
+    const { error: updErr } = await supabase
+      .from("classes")
+      .update({ term_fees: newTermFees })
+      .eq("id", (classRow as { id: string }).id);
+    if (updErr) { toast.error(updErr.message); return; }
+
+    // Cascade to student_term_fees for students in this class (active term only)
+    if (termId) {
+      // Get student ids in this class
+      const { data: classStudents, error: csErr } = await supabase
+        .from("students")
+        .select("id")
+        .eq("class_id", (classRow as { id: string }).id)
+        .eq("is_active", true);
+      if (csErr) { toast.error(csErr.message); return; }
+      const studentIds = (classStudents ?? []).map((r: { id: string }) => r.id);
+      if (studentIds.length > 0) {
+        const { error: stfErr } = await supabase
+          .from("student_term_fees")
+          .update({ expected_fee: amt })
+          .in("student_id", studentIds)
+          .eq("term_id", termId);
+        if (stfErr) { toast.error(stfErr.message); return; }
+      }
+    }
+
     setTermFees(p => ({ ...p, [stream]: amt }));
+    // Update local expectedFees for affected students
     setStudents(p => p.map(s => s.stream === stream ? { ...s, expectedFees: amt } : s));
     toast.success(`${stream} fee updated`);
   };
-  const recordTx = (t: Omit<Transaction, "id">) => {
-    const tx = { ...t, id: uid("t") };
+
+  const recordTx = async (t: Omit<Transaction, "id">) => {
+    const { data, error } = await supabase
+      .from("transactions")
+      .insert({
+        payment_date: t.date,          // payment_date (not date)
+        student_id: t.studentId,
+        amount: t.amount,
+        method: t.method,
+        reference: t.reference ?? null,
+        received_by: t.receivedBy,
+        notes: t.notes ?? null,
+      })
+      .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
+      .single();
+    if (error) { toast.error(error.message); return; }
+    const tx = txFromRow(data as TransactionRow);
     setTransactions(p => [tx, ...p]);
     setReceiptTx(tx);
     toast.success("Payment recorded");
   };
 
+  const addUnallocated = async (u: Omit<Unallocated, "id">) => {
+    const { data, error } = await supabase
+      .from("unallocated_funds")               // correct table name
+      .insert({
+        deposit_date: u.date,                   // deposit_date (not date)
+        amount: u.amount,
+        method: u.method,
+        reference: u.reference ?? null,
+        depositor_name: u.depositorName ?? null,
+        reason: u.reason,
+        resolved: false,
+      })
+      .select("id, deposit_date, amount, method, reference, depositor_name, reason")
+      .single();
+    if (error) { toast.error(error.message); return; }
+    setUnallocated(p => [unallocFromRow(data as UnallocatedRow), ...p]);
+    toast.success("Entry logged");
+  };
+
+  const allocateUnallocated = async (entryId: string, studentId: string) => {
+    const u = unallocated.find(x => x.id === entryId);
+    if (!u) return;
+
+    // Insert as a transaction (payment_date not date)
+    const { data: txData, error: txErr } = await supabase
+      .from("transactions")
+      .insert({
+        payment_date: u.date,
+        student_id: studentId,
+        amount: u.amount,
+        method: u.method,
+        reference: u.reference ?? null,
+        received_by: "Reallocated",
+        notes: `Allocated from unallocated_funds ${u.id}`,
+      })
+      .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
+      .single();
+    if (txErr) { toast.error(txErr.message); return; }
+
+    // Mark the unallocated_funds row as resolved (don't hard-delete)
+    const { error: resolveErr } = await supabase
+      .from("unallocated_funds")
+      .update({ resolved: true, resolved_tx_id: txData.id })
+      .eq("id", entryId);
+    if (resolveErr) { toast.error(resolveErr.message); return; }
+
+    const tx = txFromRow(txData as TransactionRow);
+    setTransactions(p => [tx, ...p]);
+    setUnallocated(p => p.filter(x => x.id !== entryId));
+    setReceiptTx(tx);
+    toast.success("Funds allocated");
+  };
+
   // ── Active class if applicable ───────────────────────────────────────────────
   const activeStream   = typeof page === "object" ? page.stream : null;
   const activeStudents = activeStream ? students.filter(s => s.stream === activeStream) : [];
-  const activeTxs      = activeStream ? transactions.filter(t => activeStudents.some(s => s.id === t.studentId)) : [];
 
   return (
     <div className="app-shell">
       <Toaster richColors position="top-right" />
-      {receiptTx && <ReceiptModal tx={receiptTx} student={studentLookup[receiptTx.studentId]} onClose={() => setReceiptTx(null)} />}
+      {receiptTx && (
+        <ReceiptModal
+          tx={receiptTx}
+          student={studentLookup[receiptTx.studentId]}
+          onClose={() => setReceiptTx(null)}
+        />
+      )}
 
       {/* ── Mobile header ── */}
       <div className="mobile-header">
@@ -138,7 +540,8 @@ export default function Dashboard() {
 
         <nav className="sidebar-nav">
           <div className="nav-section-label">Main</div>
-          <NavItem icon="⊞" label="Overview" active={page === "overview"} onClick={() => { setPage("overview"); setSidebarOpen(false); }} />
+          <NavItem icon="⊞" label="Overview" active={page === "overview"}
+            onClick={() => { setPage("overview"); setSidebarOpen(false); }} />
           <NavItem icon="↔" label="Transactions" active={page === "transactions"}
             badge={transactions.length}
             onClick={() => { setPage("transactions"); setSidebarOpen(false); }} />
@@ -163,7 +566,7 @@ export default function Dashboard() {
         </nav>
 
         <div className="sidebar-footer">
-          <div className="term-pill">Term 2 · 2026</div>
+          <div className="term-pill">{CURRENT_TERM.label}</div>
         </div>
       </aside>
 
@@ -188,8 +591,14 @@ export default function Dashboard() {
         </header>
 
         <main className="page-content">
+          {loading && (
+            <div className="empty-row" style={{ padding: "3rem", textAlign: "center" }}>
+              Loading…
+            </div>
+          )}
+
           {/* ── OVERVIEW ── */}
-          {page === "overview" && (
+          {!loading && page === "overview" && (
             <div className="fade-in">
               <div className="stat-grid">
                 <StatCard label="Expected Revenue"  value={fmt(totals.expected)}       hint={`${students.length} students`} />
@@ -228,13 +637,20 @@ export default function Dashboard() {
           )}
 
           {/* ── CLASS DETAIL ── */}
-          {typeof page === "object" && (() => {
+          {!loading && typeof page === "object" && (() => {
             const stream = page.stream;
             const stats  = streamStats.find(s => s.stream === stream)!;
             const classStudents = students.filter(s => s.stream === stream).map(s => {
               const paid    = transactions.filter(t => t.studentId === s.id).reduce((a, t) => a + t.amount, 0);
-              const balance = Math.max(0, s.expectedFees - paid);
-              return { ...s, paid, balance, status: (balance === 0 ? "cleared" : paid === 0 ? "unpaid" : "partial") as "cleared"|"partial"|"unpaid" };
+              // balance: positive = still owed, zero = exactly paid, negative = overpaid
+              const balance = s.expectedFees - paid;
+              // "cleared" only when expectedFees is set AND fully paid; never when fee is 0 (unset)
+              const status: "cleared"|"partial"|"unpaid"|"overpaid" =
+                s.expectedFees > 0 && paid >= s.expectedFees ? "cleared"
+                : balance < 0                                 ? "overpaid"
+                : paid > 0                                    ? "partial"
+                : "unpaid";
+              return { ...s, paid, balance, status };
             });
             const classTxs = transactions.filter(t => activeStudents.some(s => s.id === t.studentId));
 
@@ -249,7 +665,7 @@ export default function Dashboard() {
 
                 <div className="section-head">
                   <h2 className="section-title">Students — {stream}</h2>
-                  <AddStudentModal defaultStream={stream} onAdd={addStudent} />
+                  <BulkAddStudentModal defaultStream={stream} onAdd={addStudents} />
                 </div>
 
                 <div className="table-card">
@@ -274,7 +690,7 @@ export default function Dashboard() {
                           <td className="muted-cell">{s.guardian ?? "—"}</td>
                           <td className="num">{fmt(s.expectedFees)}</td>
                           <td className="num">{fmt(s.paid)}</td>
-                          <td className="num">{s.balance > 0 ? <span className="c-danger">{fmt(s.balance)}</span> : <span className="c-success">{fmt(0)}</span>}</td>
+                          <td className="num">{s.balance > 0 ? <span className="c-danger">{fmt(s.balance)}</span> : s.balance < 0 ? <span className="c-warn">Overpaid {fmt(Math.abs(s.balance))}</span> : <span className="c-success">{fmt(0)}</span>}</td>
                           <td><StatusBadge status={s.status} /></td>
                           <td>
                             <div className="row-actions">
@@ -330,7 +746,7 @@ export default function Dashboard() {
           })()}
 
           {/* ── TRANSACTIONS ── */}
-          {page === "transactions" && (
+          {!loading && page === "transactions" && (
             <TransactionsPage
               transactions={transactions}
               studentLookup={studentLookup}
@@ -341,19 +757,12 @@ export default function Dashboard() {
           )}
 
           {/* ── UNALLOCATED ── */}
-          {page === "unallocated" && (
+          {!loading && page === "unallocated" && (
             <UnallocatedPage
               entries={unallocated}
               students={students}
-              onAdd={u => { setUnallocated(p => [{ ...u, id: uid("u") }, ...p]); toast.success("Entry logged"); }}
-              onAllocate={(uid2, studentId) => {
-                const u = unallocated.find(x => x.id === uid2)!;
-                const tx: Transaction = { id: uid("t"), date: u.date, studentId, amount: u.amount, method: u.method, reference: u.reference, receivedBy: "Reallocated", notes: `Allocated from unallocated ${u.id}` };
-                setTransactions(p => [tx, ...p]);
-                setUnallocated(p => p.filter(x => x.id !== uid2));
-                setReceiptTx(tx);
-                toast.success("Funds allocated");
-              }}
+              onAdd={addUnallocated}
+              onAllocate={allocateUnallocated}
             />
           )}
         </main>
@@ -365,7 +774,7 @@ export default function Dashboard() {
 // ═══════════════════════════════════════════════════════════════════════════════
 // TRANSACTIONS PAGE
 // ═══════════════════════════════════════════════════════════════════════════════
-function TransactionsPage({ transactions, studentLookup, onViewReceipt, students, onRecord }: {
+function TransactionsPage({ transactions, studentLookup, onViewReceipt }: {
   transactions: Transaction[];
   studentLookup: Record<string, Student>;
   onViewReceipt: (t: Transaction) => void;
@@ -494,7 +903,7 @@ function UnallocatedPage({ entries, students, onAdd, onAllocate }: {
               <input type="date" value={date} onChange={e => setDate(e.target.value)} />
             </div>
             <div className="form-field">
-              <label>Amount (KES)</label>
+              <label>Amount (TZS)</label>
               <input type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)} />
             </div>
             <div className="form-field">
@@ -587,8 +996,9 @@ function StatCard({ label, value, hint, accent }: { label: string; value: string
   );
 }
 
-function StatusBadge({ status }: { status: "cleared" | "partial" | "unpaid" }) {
-  return <span className={`status-badge status-badge--${status}`}>{status}</span>;
+function StatusBadge({ status }: { status: "cleared" | "partial" | "unpaid" | "overpaid" }) {
+  const label = status === "overpaid" ? "overpaid ↑" : status;
+  return <span className={`status-badge status-badge--${status}`}>{label}</span>;
 }
 
 function MethodBadge({ method }: { method: PaymentMethod }) {
@@ -722,7 +1132,7 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
                     <input type="date" value={date} onChange={e => setDate(e.target.value)} />
                   </div>
                   <div className="form-field">
-                    <label>Amount (KES) <span className="required">*</span></label>
+                    <label>Amount (TZS) <span className="required">*</span></label>
                     <input type="number" min="0" value={amount} onChange={e => setAmount(e.target.value)} placeholder="0" />
                   </div>
                   <div className="form-field">
@@ -767,48 +1177,122 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
   );
 }
 
-// ── Add Student Modal ─────────────────────────────────────────────────────────
-function AddStudentModal({ defaultStream, onAdd }: { defaultStream?: Stream; onAdd: (s: Omit<Student, "id" | "expectedFees">) => void }) {
-  const [open, setOpen]         = useState(false);
-  const [name, setName]         = useState("");
-  const [stream, setStream]     = useState<Stream>(defaultStream ?? "PP1");
-  const [guardian, setGuardian] = useState("");
+// ── Bulk Add Student Modal ────────────────────────────────────────────────────
+// Allows adding multiple students at once, each with their own class and guardian.
+type StudentDraft = { name: string; stream: Stream; guardian: string };
+
+function BulkAddStudentModal({ defaultStream, onAdd }: {
+  defaultStream?: Stream;
+  onAdd: (students: Array<Omit<Student, "id" | "expectedFees">>) => void;
+}) {
+  const blank = (): StudentDraft => ({ name: "", stream: defaultStream ?? "PP1", guardian: "" });
+  const [open, setOpen]     = useState(false);
+  const [drafts, setDrafts] = useState<StudentDraft[]>([blank()]);
+
+  const setField = (i: number, field: keyof StudentDraft, value: string) =>
+    setDrafts(p => p.map((d, idx) => idx === i ? { ...d, [field]: value } : d));
+
+  const addRow    = () => setDrafts(p => [...p, blank()]);
+  const removeRow = (i: number) => setDrafts(p => p.filter((_, idx) => idx !== i));
 
   const submit = () => {
-    if (!name.trim()) { toast.error("Enter student name"); return; }
-    onAdd({ name: name.trim(), stream, guardian: guardian.trim() || undefined });
-    setOpen(false); setName(""); setGuardian("");
+    const valid = drafts.filter(d => d.name.trim());
+    if (valid.length === 0) { toast.error("Enter at least one student name"); return; }
+    onAdd(valid.map(d => ({ name: d.name.trim(), stream: d.stream, guardian: d.guardian.trim() || undefined })));
+    setOpen(false);
+    setDrafts([blank()]);
   };
+
+  const close = () => { setOpen(false); setDrafts([blank()]); };
 
   return (
     <>
+      <style>{`
+        .modal--bulk { max-width: 720px; width: 95vw; }
+        .bulk-hint { font-size: .8rem; color: var(--c-text-muted, #888); margin: 0 0 1rem; }
+        .bulk-table { display: flex; flex-direction: column; gap: .4rem; margin-bottom: .75rem; }
+        .bulk-header { display: grid; grid-template-columns: 1fr 130px 1fr 28px; gap: .5rem;
+          font-size: .68rem; font-weight: 700; letter-spacing: .08em; text-transform: uppercase;
+          color: var(--c-text-muted, #999); padding: 0 2px; }
+        .bulk-row { display: grid; grid-template-columns: 1fr 130px 1fr 28px; gap: .5rem; align-items: center; }
+        .bulk-input, .bulk-select {
+          width: 100%; padding: .42rem .6rem; border: 1px solid var(--c-border, #dde1e7);
+          border-radius: 6px; font-size: .85rem; background: var(--c-surface, #fff);
+          color: var(--c-text, #111); outline: none; transition: border-color .15s;
+        }
+        .bulk-input:focus, .bulk-select:focus { border-color: var(--c-primary, #2563eb); }
+        .bulk-remove {
+          display: flex; align-items: center; justify-content: center;
+          width: 28px; height: 28px; border: none; border-radius: 6px; cursor: pointer;
+          background: transparent; color: var(--c-danger, #dc2626); font-size: .9rem;
+          transition: background .15s;
+        }
+        .bulk-remove:hover:not(:disabled) { background: #fee2e2; }
+        .bulk-remove:disabled { opacity: .3; cursor: default; }
+        .bulk-add-row {
+          display: inline-flex; align-items: center; gap: .3rem; font-size: .82rem;
+          color: var(--c-primary, #2563eb); background: none; border: none; cursor: pointer;
+          padding: .25rem 0; margin-bottom: .75rem; font-weight: 600;
+        }
+        .bulk-add-row:hover { text-decoration: underline; }
+      `}</style>
       <button className="btn-outline" onClick={() => setOpen(true)}>+ Add Student</button>
       {open && (
-        <div className="modal-overlay" onClick={() => setOpen(false)}>
-          <div className="modal modal--sm" onClick={e => e.stopPropagation()}>
+        <div className="modal-overlay" onClick={close}>
+          <div className="modal modal--bulk" onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3>Add Student</h3>
-              <button className="modal-close" onClick={() => setOpen(false)}>✕</button>
+              <h3>Add Students</h3>
+              <button className="modal-close" onClick={close}>✕</button>
             </div>
-            <div className="form-grid">
-              <div className="form-field form-field--full">
-                <label>Full Name <span className="required">*</span></label>
-                <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Amani Wanjiku" />
+
+            <p className="bulk-hint">Add one or more students. Each row is one student.</p>
+
+            <div className="bulk-table">
+              <div className="bulk-header">
+                <span>Full Name <span className="required">*</span></span>
+                <span>Class</span>
+                <span>Guardian <span className="optional">(optional)</span></span>
+                <span></span>
               </div>
-              <div className="form-field form-field--full">
-                <label>Class</label>
-                <select value={stream} onChange={e => setStream(e.target.value as Stream)}>
-                  {STREAMS.map(s => <option key={s} value={s}>{s}</option>)}
-                </select>
-              </div>
-              <div className="form-field form-field--full">
-                <label>Guardian Name <span className="optional">(optional)</span></label>
-                <input value={guardian} onChange={e => setGuardian(e.target.value)} />
-              </div>
+              {drafts.map((d, i) => (
+                <div key={i} className="bulk-row">
+                  <input
+                    className="bulk-input"
+                    value={d.name}
+                    onChange={e => setField(i, "name", e.target.value)}
+                    placeholder="e.g. Amani Wanjiku"
+                    autoFocus={i === 0}
+                  />
+                  <select
+                    className="bulk-select"
+                    value={d.stream}
+                    onChange={e => setField(i, "stream", e.target.value as Stream)}
+                  >
+                    {STREAMS.map(s => <option key={s} value={s}>{s}</option>)}
+                  </select>
+                  <input
+                    className="bulk-input"
+                    value={d.guardian}
+                    onChange={e => setField(i, "guardian", e.target.value)}
+                    placeholder="e.g. Jane Doe"
+                  />
+                  <button
+                    className="bulk-remove"
+                    onClick={() => removeRow(i)}
+                    disabled={drafts.length === 1}
+                    title="Remove row"
+                  >✕</button>
+                </div>
+              ))}
             </div>
+
+            <button className="bulk-add-row" onClick={addRow}>+ Add another student</button>
+
             <div className="form-actions">
-              <button className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
-              <button className="btn-primary" onClick={submit}>Add Student</button>
+              <button className="btn-ghost" onClick={close}>Cancel</button>
+              <button className="btn-primary" onClick={submit}>
+                Enrol {drafts.filter(d => d.name.trim()).length || ""} Student{drafts.filter(d => d.name.trim()).length !== 1 ? "s" : ""}
+              </button>
             </div>
           </div>
         </div>
@@ -850,7 +1334,7 @@ function EditStudentModal({ student, onSave }: { student: Student; onSave: (s: S
                 <input value={guardian} onChange={e => setGuardian(e.target.value)} />
               </div>
               <div className="form-field form-field--full">
-                <label>Expected Fees (KES)</label>
+                <label>Expected Fees (TZS)</label>
                 <input type="number" value={fees} onChange={e => setFees(e.target.value)} />
               </div>
             </div>
@@ -898,17 +1382,17 @@ function MoveStudentModal({ student, currentStream, onMove }: { student: Student
 }
 
 // ── Edit Fees Modal ───────────────────────────────────────────────────────────
-function EditFeesModal({ termFees, onUpdate }: { termFees: TermFees; onUpdate: (s: Stream, v: number) => void }) {
+function EditFeesModal({ termFees, onUpdate }: { termFees: TermFees; onUpdate: (s: Stream, v: number) => void | Promise<void> }) {
   const [open, setOpen]     = useState(false);
   const [drafts, setDrafts] = useState<Record<Stream, string>>(() =>
     Object.fromEntries(STREAMS.map(s => [s, String(termFees[s])])) as Record<Stream, string>
   );
 
-  const saveAll = () => {
+  const saveAll = async () => {
     for (const s of STREAMS) {
       const v = Number(drafts[s]);
       if (!v || v <= 0) { toast.error(`Invalid fee for ${s}`); return; }
-      onUpdate(s, v);
+      await onUpdate(s, v);
     }
     setOpen(false);
   };
@@ -943,7 +1427,7 @@ function EditFeesModal({ termFees, onUpdate }: { termFees: TermFees; onUpdate: (
 }
 
 // ── Allocate Inline ───────────────────────────────────────────────────────────
-function AllocateInline({ entryId, students, onAllocate }: { entryId: string; students: Student[]; onAllocate: (studentId: string) => void }) {
+function AllocateInline({ entryId: _entryId, students, onAllocate }: { entryId: string; students: Student[]; onAllocate: (studentId: string) => void }) {
   const [open, setOpen]           = useState(false);
   const [selectedStream, setSelectedStream] = useState<Stream | "">("");
   const [studentSearch, setStudentSearch]   = useState("");
@@ -1062,11 +1546,11 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
             <tr><td>Amount Paid</td><td><span className="amount">{fmt(tx.amount)}</span></td></tr>
             {student && <tr><td>Term Fee</td><td>{fmt(student.expectedFees)}</td></tr>}
           </tbody></table>
-          <p className="footer">Official receipt — retain for your records.<br />Madam Paradise School · Term 2, 2026</p>
+          <p className="footer">Official receipt — retain for your records.<br />Madam Paradise School · {CURRENT_TERM.label}</p>
         </div>
         <div className="form-actions">
           <button className="btn-ghost" onClick={onClose}>Close</button>
-          <button className="btn-primary" onClick={print}>🖨 Print Receipt</button>
+          <button className="btn-primary" onClick={print}>Print Receipt</button>
         </div>
       </div>
     </div>
