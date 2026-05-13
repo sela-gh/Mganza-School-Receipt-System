@@ -42,14 +42,16 @@ export interface DbClass {
 }
 
 export interface DbStudent {
-  id:         string;
-  full_name:  string;
-  class_id:   string;
-  guardian:   string | null;
-  is_active:  boolean;
-  notes:      string | null;
-  created_at: string;
-  updated_at: string;
+  id:             string;
+  full_name:      string;      // Note: your dashboard.tsx uses 'name', ensure this matches your DB
+  class_id:       string;      // Note: your dashboard.tsx uses 'stream', ensure this matches your DB
+  guardian:       string | null;
+  uses_transport: boolean;     // <--- ADD THIS LINE
+  expected_fees:  number;      // <--- ADD THIS LINE (if not already there)
+  is_active:      boolean;
+  notes:          string | null;
+  created_at:     string;
+  updated_at:     string;
 }
 
 export interface DbStudentTermFee {
@@ -156,7 +158,7 @@ export async function getStudents(classId?: string): Promise<DbStudent[]> {
 
 /** Add a new student */
 export async function addStudent(
-  payload: Pick<DbStudent, "full_name" | "class_id" | "guardian">
+  payload: Pick<DbStudent, "full_name" | "class_id" | "guardian" | "uses_transport" | "expected_fees">
 ): Promise<DbStudent | null> {
   const { data, error } = await supabase
     .from("students")
@@ -170,7 +172,7 @@ export async function addStudent(
 /** Update a student */
 export async function updateStudent(
   id: string,
-  payload: Partial<Pick<DbStudent, "full_name" | "guardian" | "class_id" | "is_active" | "notes">>
+  payload: Partial<Pick<DbStudent, "full_name" | "guardian" | "class_id" | "is_active" | "notes" | "uses_transport" | "expected_fees">>
 ): Promise<boolean> {
   const { error } = await supabase.from("students").update(payload).eq("id", id);
   if (error) { console.error("updateStudent:", error); return false; }
