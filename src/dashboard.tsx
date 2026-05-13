@@ -13,23 +13,36 @@ const STREAMS: Stream[] = [
   "Class 1", "Class 2", "Class 3", "Class 4", "Class 5", "Class 6", "Class 7",
 ];
 
-// term_fees JSONB shape stored in classes table:
-// {
-//   "1_base": 15000,       ← Term 1, day student (no transport)
-//   "1_transport": 22000,  ← Term 1, day student WITH school transport
-//   "2_base": 15000,
-//   "2_transport": 22000,
-// }
-type TermFeeMap = Record<Stream, number>;       // base fees for current term
-type TermFeeTransportMap = Record<Stream, number>; // transport fees for current term
+type StudentType = "Day" | "Transport" | "Boarder";
+
+// NEW: Global Fees structure replacing per-class JSONB
+type GlobalFees = {
+  dayBase: number;        // e.g., 200000
+  transportBase: number;  // e.g., 250000
+  boarderBase: number;    // e.g., 325000
+  tuitionBoarder: number; // e.g., 130000
+  tuitionDay: number;     // e.g., 60000
+  library: number;
+  caution: number;
+  registration: number;
+  uniforms: {
+    fullUpper: number;    // 70000 (Class 1-7)
+    fullLower: number;    // 60000 (PP1-PP2)
+    tracksuit: number;    // 30000
+    boys: { sweater: number; tshirt: number; socks: number; khakiShorts: number; greenShorts: number; weekend: number };
+    girls: { sweater: number; tshirt: number; socks: number; skirt: number; weekend: number };
+  };
+};
 
 type Student = {
   id:            string;
   name:          string;
   stream:        Stream;
   guardian?:     string;
-  usesTransport: boolean;   // NEW — drives which fee bucket applies
+  phone?:        string;      // NEW
+  type:          StudentType; // NEW
   expectedFees:  number;
+  walletBalance: number;
 };
 
 type PaymentMethod = "Bank Transfer" | "Cash";
@@ -57,14 +70,15 @@ type Unallocated = {
 
 // ─── DB row types ──────────────────────────────────────────────────────────────
 type StudentRow = {
-  id:               string;
-  full_name:        string;
-  class_id:         string;
-  guardian:         string | null;
-  uses_transport:   boolean;          // NEW column on students table
-  classes:          { name: string; term_fees: Record<string, number> | null } |
-                    { name: string; term_fees: Record<string, number> | null }[] | null;
+  id:                string;
+  full_name:         string;
+  class_id:          string;
+  guardian:          string | null;
+  parent_phone:      string | null;  // NEW
+  student_type:      StudentType;    // NEW
+  classes:           { name: string } | { name: string }[] | null;
   student_term_fees: Array<{ expected_fee: number; term_id?: string }> | null;
+  wallet_balance: number;
 };
 
 type TransactionRow = {
@@ -92,54 +106,83 @@ type UnallocatedRow = {
 const fmt = (n: number) =>
   new Intl.NumberFormat("en-TZ", { style: "currency", currency: "TZS", maximumFractionDigits: 0 }).format(n);
 
-const EMPTY_FEES: TermFeeMap = STREAMS.reduce((acc, s) => { acc[s] = 0; return acc; }, {} as TermFeeMap);
+function calculateExpectedFees(
+  stream: Stream, 
+  type: StudentType, 
+  isNew: boolean, 
+  globalFees: GlobalFees,
+  termNumber: number // NEW: We now pass the term number to apply rules
+): number {
+  let total = 0;
 
-// Given a class's term_fees jsonb and the current term number,
-// return {base, transport} fees. Falls back to 0 if key missing.
-function extractFees(
-  termFees: Record<string, number> | null | undefined,
-  termNumber: number,
-): { base: number; transport: number } {
-  if (!termFees) return { base: 0, transport: 0 };
-  return {
-    base:      Number(termFees[`${termNumber}_base`]      ?? termFees[String(termNumber)] ?? 0),
-    transport: Number(termFees[`${termNumber}_transport`] ?? 0),
-  };
+  // 1. Base Installment Fees (Charged every term)
+  if (type === "Boarder") total += globalFees.boarderBase;
+  else if (type === "Transport") total += globalFees.transportBase;
+  else total += globalFees.dayBase;
+
+  // 2. Annual Mandatory Fees (Charged once in Term 1)
+  if (termNumber === 1) {
+    total += globalFees.library;
+    total += globalFees.caution; 
+  }
+
+  // 3. Tuition Fees (Class 4 & 7, charged in Term 2)
+  if (termNumber === 2) {
+    if (stream === "Class 7") {
+      total += globalFees.tuitionBoarder;
+    } else if (stream === "Class 4") {
+      total += (type === "Boarder") ? globalFees.tuitionBoarder : globalFees.tuitionDay;
+    }
+  }
+
+  // 4. Registration (New students only)
+  if (isNew) {
+    total += globalFees.registration;
+  }
+
+  return total;
 }
 
-// ─── Term helpers ─────────────────────────────────────────────────────────────
-type TermLabel = { number: 1 | 2; year: number; label: string; start: string; end: string };
+// ─── Term helpers (Updated for 4 Terms) ─────────────────────────────────────────
+type TermLabel = { number: 1 | 2 | 3 | 4; year: number; label: string; start: string; end: string };
 
 function getCurrentTerm(): TermLabel {
   const now   = new Date();
   const month = now.getMonth() + 1;
   const year  = now.getFullYear();
-  if (month >= 1 && month <= 6)
-    return { number: 1, year, label: `Term 1 · ${year}`, start: `${year}-01-01`, end: `${year}-06-30` };
-  return { number: 2, year, label: `Term 2 · ${year}`, start: `${year}-07-01`, end: `${year}-11-30` };
+  
+  // 4 terms (installments) across the year
+  if (month >= 1 && month <= 3)
+    return { number: 1, year, label: `Term 1 · ${year}`, start: `${year}-01-01`, end: `${year}-03-31` };
+  if (month >= 4 && month <= 6)
+    return { number: 2, year, label: `Term 2 · ${year}`, start: `${year}-04-01`, end: `${year}-06-30` };
+  if (month >= 7 && month <= 9)
+    return { number: 3, year, label: `Term 3 · ${year}`, start: `${year}-07-01`, end: `${year}-09-30` };
+  
+  return { number: 4, year, label: `Term 4 · ${year}`, start: `${year}-10-01`, end: `${year}-12-31` };
 }
 
 const CURRENT_TERM = getCurrentTerm();
 
 // Map a StudentRow → Student UI type
-const studentFromRow = (r: StudentRow, termKey?: string): Student => {
-  const classesObj  = Array.isArray(r.classes) ? r.classes[0] : r.classes;
-  const termNumber  = Number(termKey ?? String(CURRENT_TERM.number));
-  const { base, transport } = extractFees(classesObj?.term_fees, termNumber);
-  const usesTransport = r.uses_transport ?? false;
-
-  // student_term_fees is the per-student override (e.g. bursaries)
-  const stfFee      = r.student_term_fees?.[0]?.expected_fee;
-  // If no override, pick the right bucket (base vs transport)
-  const expectedFees = stfFee != null ? stfFee : (usesTransport ? transport : base);
+const studentFromRow = (r: StudentRow, globalFees: GlobalFees, currentTerm: TermLabel): Student => {
+  const classesObj = Array.isArray(r.classes) ? r.classes[0] : r.classes;
+  const stream     = (classesObj?.name ?? "") as Stream;
+  const type       = r.student_type ?? "Day";
+  const stfFee     = r.student_term_fees?.[0]?.expected_fee;
+  
+  const baseline   = calculateExpectedFees(stream, type, false, globalFees, currentTerm.number);
+  const expectedFees = stfFee != null ? stfFee : baseline;
 
   return {
     id:            r.id,
     name:          r.full_name,
-    stream:        (classesObj?.name ?? "") as Stream,
+    stream,
     guardian:      r.guardian ?? undefined,
-    usesTransport,
+    phone:         r.parent_phone ?? undefined,
+    type,
     expectedFees,
+    walletBalance: Number(r.wallet_balance || 0), // NEW
   };
 };
 
@@ -148,19 +191,35 @@ const txFromRow        = (r: TransactionRow): Transaction => ({
   method: r.method, reference: r.reference ?? undefined,
   receivedBy: r.received_by, notes: r.notes ?? undefined,
 });
+
 const unallocFromRow   = (r: UnallocatedRow): Unallocated => ({
   id: r.id, date: r.deposit_date, amount: r.amount, method: r.method,
   reference: r.reference ?? undefined, depositorName: r.depositor_name ?? undefined, reason: r.reason,
 });
 
-type Page = "overview" | "transactions" | "unallocated" | { type: "class"; stream: Stream };
+type Page = "overview" | "transactions" | "unallocated" | "uniforms" | { type: "class"; stream: Stream };
+
+const DEFAULT_GLOBAL_FEES: GlobalFees = {
+  dayBase: 200000,
+  transportBase: 250000,
+  boarderBase: 325000,
+  tuitionBoarder: 130000,
+  tuitionDay: 60000,
+  library: 0,
+  caution: 0,
+  registration: 0,
+  uniforms: {
+    fullUpper: 70000, fullLower: 60000, tracksuit: 30000,
+    boys: { sweater: 0, tshirt: 0, socks: 0, khakiShorts: 0, greenShorts: 0, weekend: 0 },
+    girls: { sweater: 0, tshirt: 0, socks: 0, skirt: 0, weekend: 0 }
+  }
+};
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ROOT
 // ═══════════════════════════════════════════════════════════════════════════════
 export default function Dashboard() {
-  const [termFees,          setTermFees]          = useState<TermFeeMap>(EMPTY_FEES);
-  const [termFeesTransport, setTermFeesTransport] = useState<TermFeeTransportMap>(EMPTY_FEES);
+const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
   const [students,          setStudents]          = useState<Student[]>([]);
   const [transactions,      setTransactions]      = useState<Transaction[]>([]);
   const [unallocated,       setUnallocated]       = useState<Unallocated[]>([]);
@@ -169,7 +228,7 @@ export default function Dashboard() {
   const [receiptTx,         setReceiptTx]         = useState<Transaction | null>(null);
   const [sidebarOpen,       setSidebarOpen]       = useState(false);
 
-  // ── Load ─────────────────────────────────────────────────────────────────────
+ // ── Load ─────────────────────────────────────────────────────────────────────
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -183,19 +242,28 @@ export default function Dashboard() {
           .maybeSingle();
         const termId: string | null = (termData as { id: string } | null)?.id ?? null;
 
+        // Fetch the master fees from our new settings table!
+        const { data: settings } = await supabase.from("settings").select("global_fees").maybeSingle();
+        
+        // FIX: Use a local variable to hold the fetched fees so we don't need 
+        // to put globalFees in the dependency array below (which caused the infinite loop)
+       let activeFees = DEFAULT_GLOBAL_FEES; // Use the constant, not the state variable!
+        if (settings?.global_fees) {
+          activeFees = settings.global_fees;
+          setGlobalFees(activeFees);
+        }
+
         const [classesRes, studentsRes, txsRes, unallocRes] = await Promise.all([
-          supabase.from("classes").select("id, name, term_fees").order("sort_order"),
+          supabase.from("classes").select("id, name").order("sort_order"),
           supabase
             .from("students")
-            // NEW: select uses_transport
-            .select("id, full_name, class_id, guardian, uses_transport, classes(name, term_fees), student_term_fees(expected_fee, term_id)")
+            .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, classes(name), student_term_fees(expected_fee, term_id)")
             .eq("is_active", true)
             .order("full_name"),
           supabase
             .from("transactions")
             .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
-            .gte("payment_date", CURRENT_TERM.start)
-            .lte("payment_date", CURRENT_TERM.end)
+            // Removed date filters so the cumulative wallet calculation works!
             .order("payment_date", { ascending: false }),
           supabase
             .from("unallocated_funds")
@@ -210,32 +278,19 @@ export default function Dashboard() {
         if (txsRes.error)      throw txsRes.error;
         if (unallocRes.error)  throw unallocRes.error;
 
-        // Build both fee maps from classes.term_fees jsonb
-        if (classesRes.data) {
-          const baseFees:      TermFeeMap = { ...EMPTY_FEES };
-          const transportFees: TermFeeMap = { ...EMPTY_FEES };
-          for (const row of classesRes.data as Array<{ id: string; name: string; term_fees: Record<string, number> | null }>) {
-            if ((STREAMS as string[]).includes(row.name)) {
-              const { base, transport } = extractFees(row.term_fees, CURRENT_TERM.number);
-              baseFees[row.name as Stream]      = base;
-              transportFees[row.name as Stream] = transport;
-            }
-          }
-          setTermFees(baseFees);
-          setTermFeesTransport(transportFees);
-        }
-
-        const termKey     = String(CURRENT_TERM.number);
         const rawStudents = (studentsRes.data ?? []) as Array<StudentRow & {
           student_term_fees: Array<{ expected_fee: number; term_id?: string }> | null;
         }>;
+        
         const filteredStudents = rawStudents.map(s => ({
           ...s,
           student_term_fees: termId
             ? (s.student_term_fees ?? []).filter(f => f.term_id === termId)
             : (s.student_term_fees ?? []),
         }));
-        setStudents(filteredStudents.map(s => studentFromRow(s as StudentRow, termKey)));
+        
+        // Pass the activeFees we just fetched
+        setStudents(filteredStudents.map(s => studentFromRow(s as StudentRow, activeFees, CURRENT_TERM)));
         setTransactions((txsRes.data ?? []).map(r => txFromRow(r as TransactionRow)));
         setUnallocated((unallocRes.data ?? []).map(r => unallocFromRow(r as UnallocatedRow)));
       } catch (err) {
@@ -256,7 +311,7 @@ export default function Dashboard() {
     return { expected, collected, debt: Math.max(0, expected - collected), unallocatedAmt: unallocated.reduce((a, u) => a + u.amount, 0) };
   }, [students, transactions, unallocated]);
 
-  const streamStats = useMemo(() => STREAMS.map(stream => {
+ const streamStats = useMemo(() => STREAMS.map(stream => {
     const ss  = students.filter(s => s.stream === stream);
     const exp = ss.reduce((a, s) => a + s.expectedFees, 0);
     const col = transactions.filter(t => ss.some(s => s.id === t.studentId)).reduce((a, t) => a + t.amount, 0);
@@ -265,19 +320,18 @@ export default function Dashboard() {
 
   // ── Mutators ─────────────────────────────────────────────────────────────────
 
-  // addStudents: now receives usesTransport per student
   const addStudents = async (
-    newStudents: Array<Omit<Student, "id" | "expectedFees">>
+    newStudents: Array<Omit<Student, "id" | "expectedFees" | "walletBalance"> & { isNew: boolean }>
   ) => {
     if (newStudents.length === 0) return;
 
     const streamSet = [...new Set(newStudents.map(s => s.stream))];
     const { data: classRows, error: classErr } = await supabase
-      .from("classes").select("id, name, term_fees").in("name", streamSet);
+      .from("classes").select("id, name").in("name", streamSet);
     if (classErr) { toast.error(classErr.message); return; }
 
     const classMap = Object.fromEntries(
-      (classRows ?? []).map((r: { id: string; name: string; term_fees: Record<string, number> | null }) => [r.name, r])
+      (classRows ?? []).map((r: { id: string; name: string }) => [r.name, r])
     );
 
     const insertRows = newStudents.map(s => {
@@ -287,18 +341,18 @@ export default function Dashboard() {
         full_name:      s.name,
         class_id:       cls.id,
         guardian:       s.guardian ?? null,
-        uses_transport: s.usesTransport,   // NEW column
+        parent_phone:   s.phone ?? null,
+        student_type:   s.type,
       };
     });
 
     const { data, error } = await supabase
       .from("students")
       .insert(insertRows)
-      .select("id, full_name, class_id, guardian, uses_transport, classes(name, term_fees), student_term_fees(expected_fee, term_id)");
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)");
     if (error) { toast.error(error.message); return; }
 
-    const termKey = String(CURRENT_TERM.number);
-    const added   = (data ?? []).map(r => studentFromRow(r as unknown as StudentRow, termKey));
+    const added = (data ?? []).map(r => studentFromRow(r as unknown as StudentRow, globalFees, CURRENT_TERM));
     setStudents(p => [...p, ...added]);
     toast.success(added.length === 1 ? `${added[0].name} enrolled` : `${added.length} students enrolled`);
   };
@@ -311,12 +365,18 @@ export default function Dashboard() {
 
     const { data, error } = await supabase
       .from("students")
-      .update({ full_name: s.name, class_id: classRow.id, guardian: s.guardian ?? null, uses_transport: s.usesTransport })
+      .update({ 
+        full_name: s.name, 
+        class_id: classRow.id, 
+        guardian: s.guardian ?? null, 
+        parent_phone: s.phone ?? null, 
+        student_type: s.type 
+      })
       .eq("id", s.id)
-      .select("id, full_name, class_id, guardian, uses_transport, classes(name, term_fees), student_term_fees(expected_fee, term_id)")
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
-    setStudents(p => p.map(x => x.id === s.id ? studentFromRow(data as unknown as StudentRow, String(CURRENT_TERM.number)) : x));
+    setStudents(p => p.map(x => x.id === s.id ? studentFromRow(data as unknown as StudentRow, globalFees, CURRENT_TERM) : x));
     toast.success("Student updated");
   };
 
@@ -336,73 +396,80 @@ export default function Dashboard() {
       .from("students")
       .update({ class_id: classRow.id })
       .eq("id", id)
-      .select("id, full_name, class_id, guardian, uses_transport, classes(name, term_fees), student_term_fees(expected_fee, term_id)")
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
-    setStudents(p => p.map(s => s.id === id ? studentFromRow(data as unknown as StudentRow, String(CURRENT_TERM.number)) : s));
+    setStudents(p => p.map(s => s.id === id ? studentFromRow(data as unknown as StudentRow, globalFees, CURRENT_TERM) : s));
     toast.success("Student moved to " + to);
   };
 
-  // updateFee now receives which bucket (base | transport) is being changed
-  const updateFee = async (stream: Stream, bucket: "base" | "transport", amt: number) => {
-    const { data: classRow, error: fetchErr } = await supabase
-      .from("classes").select("id, term_fees").eq("name", stream).maybeSingle();
-    if (fetchErr) { toast.error(fetchErr.message); return; }
-    if (!classRow) { toast.error(`Class "${stream}" not found`); return; }
-
-    const { data: activeTerm } = await supabase
-      .from("terms").select("id").eq("term_number", CURRENT_TERM.number).eq("year", CURRENT_TERM.year).maybeSingle();
-    const termId: string | null = (activeTerm as { id: string } | null)?.id ?? null;
-
-    // Update the correct key in the JSONB object
-    const currentFees = (classRow.term_fees ?? {}) as Record<string, number>;
-    const feeKey      = `${CURRENT_TERM.number}_${bucket}`;
-    const newTermFees = { ...currentFees, [feeKey]: amt };
-
-    const { error: updErr } = await supabase
-      .from("classes").update({ term_fees: newTermFees }).eq("id", (classRow as { id: string }).id);
-    if (updErr) { toast.error(updErr.message); return; }
-
-    // Cascade to student_term_fees for students in this class whose bucket matches
-    if (termId) {
-      const { data: classStudents } = await supabase
-        .from("students").select("id, uses_transport").eq("class_id", (classRow as { id: string }).id).eq("is_active", true);
-      const targetStudents = (classStudents ?? []).filter(
-        (r: { id: string; uses_transport: boolean }) =>
-          (bucket === "transport") === r.uses_transport
-      );
-      const studentIds = targetStudents.map((r: { id: string }) => r.id);
-      if (studentIds.length > 0) {
-        await supabase
-          .from("student_term_fees")
-          .update({ expected_fee: amt })
-          .in("student_id", studentIds)
-          .eq("term_id", termId);
-      }
-    }
-
-    // Update local state
-    if (bucket === "base") {
-      setTermFees(p => ({ ...p, [stream]: amt }));
-      setStudents(p => p.map(s => s.stream === stream && !s.usesTransport ? { ...s, expectedFees: amt } : s));
-    } else {
-      setTermFeesTransport(p => ({ ...p, [stream]: amt }));
-      setStudents(p => p.map(s => s.stream === stream && s.usesTransport ? { ...s, expectedFees: amt } : s));
-    }
-    toast.success(`${stream} ${bucket === "base" ? "day" : "transport"} fee updated`);
+const updateGlobalFees = async (newFees: GlobalFees) => {
+    setGlobalFees(newFees);
+    setStudents(p => p.map(s => {
+      // FIX: Passing the actual term number instead of a true/false check
+      const baseline = calculateExpectedFees(s.stream, s.type, false, newFees, CURRENT_TERM.number);
+      return { ...s, expectedFees: baseline };
+    }));
+    toast.success("Global fees updated!");
   };
-
   const recordTx = async (t: Omit<Transaction, "id">) => {
+    const student = studentLookup[t.studentId];
+    
+    // Calculate what is strictly owed for THIS term
+    const currentPaid = transactions.filter(tx => tx.studentId === student.id).reduce((a, x) => a + x.amount, 0);
+    const balanceOwed = student.expectedFees - currentPaid - student.walletBalance;
+
+    // 1. Insert the ACTUAL payment (Parent gets receipt for the full amount)
     const { data, error } = await supabase
       .from("transactions")
       .insert({ payment_date: t.date, student_id: t.studentId, amount: t.amount, method: t.method, reference: t.reference ?? null, received_by: t.receivedBy, notes: t.notes ?? null })
       .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
       .single();
+
     if (error) { toast.error(error.message); return; }
     const tx = txFromRow(data as TransactionRow);
-    setTransactions(p => [tx, ...p]);
-    setReceiptTx(tx);
-    toast.success("Payment recorded");
+    
+    // We will store our new transactions here to update state safely
+    const newTransactionsToAdd: Transaction[] = [tx];
+
+    // 2. The Magic Wallet logic: Move excess to wallet
+    if (t.amount > balanceOwed) {
+      // If balanceOwed was already negative, the entire payment is excess
+      const excess = balanceOwed < 0 ? t.amount : t.amount - balanceOwed;
+
+      // Update Database Wallet
+      await supabase
+        .from("students")
+        .update({ wallet_balance: student.walletBalance + excess })
+        .eq("id", student.id);
+
+      // Update Local State Wallet
+      setStudents(p => p.map(s => s.id === student.id ? { ...s, walletBalance: s.walletBalance + excess } : s));
+
+      // 3. Insert a hidden system offset so the term doesn't visually double-count
+      const { data: offsetData } = await supabase
+        .from("transactions")
+        .insert({
+          payment_date: t.date,
+          student_id: student.id,
+          amount: -excess,
+          method: t.method,
+          received_by: "System",
+          notes: `Auto-transfer excess to Wallet (Ref: ${tx.id})`
+        })
+        .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
+        .single();
+
+      if (offsetData) {
+        newTransactionsToAdd.unshift(txFromRow(offsetData as TransactionRow)); // Add offset to the front
+      }
+    }
+
+    // Safely update React state using the previous state to avoid race conditions
+    setTransactions(prev => [...newTransactionsToAdd, ...prev]);
+    
+    setReceiptTx(tx); // Only show receipt for the REAL payment
+    toast.success("Payment recorded & Wallet updated if overpaid");
   };
 
   const addUnallocated = async (u: Omit<Unallocated, "id">) => {
@@ -470,6 +537,12 @@ export default function Dashboard() {
           <NavItem icon="⊞" label="Overview" active={page === "overview"} onClick={() => { setPage("overview"); setSidebarOpen(false); }} />
           <NavItem icon="↔" label="Transactions" active={page === "transactions"} badge={transactions.length} onClick={() => { setPage("transactions"); setSidebarOpen(false); }} />
           <NavItem icon="◎" label="Unallocated" active={page === "unallocated"} badge={unallocated.length > 0 ? unallocated.length : undefined} badgeAlert onClick={() => { setPage("unallocated"); setSidebarOpen(false); }} />
+          <NavItem 
+  icon="👕" 
+  label="Uniform Sales" 
+  active={page === "uniforms"} 
+  onClick={() => { setPage("uniforms"); setSidebarOpen(false); }} 
+/>
           <div className="nav-section-label" style={{ marginTop: "1.5rem" }}>Classes</div>
           {STREAMS.map(stream => {
             const st = streamStats.find(s => s.stream === stream)!;
@@ -519,7 +592,7 @@ export default function Dashboard() {
               </div>
               <div className="section-head">
                 <h2 className="section-title">Classes</h2>
-                <EditFeesModal termFees={termFees} termFeesTransport={termFeesTransport} onUpdate={updateFee} />
+                <EditFeesModal globalFees={globalFees} onUpdateFees={updateGlobalFees} />
               </div>
               <div className="class-grid">
                 {streamStats.map(row => {
@@ -530,7 +603,7 @@ export default function Dashboard() {
                         <span className="class-name">{row.stream}</span>
                         <span className="class-count">{row.count} pupils</span>
                       </div>
-                      <div className="class-fee-label">Day {fmt(termFees[row.stream])} · Transport {fmt(termFeesTransport[row.stream])}</div>
+                     <div className="class-fee-label">Day {fmt(globalFees.dayBase)} · Transport {fmt(globalFees.transportBase)} · Boarder {fmt(globalFees.boarderBase)}</div>
                       <div className="progress-bar">
                         <div className="progress-fill" style={{ width: `${pct}%` }} />
                       </div>
@@ -550,21 +623,23 @@ export default function Dashboard() {
             const stream     = page.stream;
             const stats      = streamStats.find(s => s.stream === stream)!;
             const classStudents = students.filter(s => s.stream === stream).map(s => {
-              const paid    = transactions.filter(t => t.studentId === s.id).reduce((a, t) => a + t.amount, 0);
-              const balance = s.expectedFees - paid;
-              const status: "cleared" | "partial" | "unpaid" | "overpaid" =
-                s.expectedFees > 0 && paid >= s.expectedFees ? "cleared"
-                : balance < 0 ? "overpaid"
-                : paid > 0   ? "partial"
-                : "unpaid";
-              return { ...s, paid, balance, status };
-            });
+  const paid    = transactions.filter(t => t.studentId === s.id).reduce((a, t) => a + t.amount, 0);
+  
+  // Balance calculation uses the wallet credit!
+  const balance = s.expectedFees - paid - s.walletBalance;
+  
+  const status: "cleared" | "partial" | "unpaid" =
+    balance <= 0 ? "cleared"
+    : (paid + s.walletBalance) > 0 ? "partial"
+    : "unpaid";
+  return { ...s, paid, balance, status };
+});
             const classTxs = transactions.filter(t => activeStudents.some(s => s.id === t.studentId));
 
             return (
               <div className="fade-in">
                 <div className="stat-grid">
-                  <StatCard label="Enrolled"    value={String(stats.count)} hint={`Day ${fmt(termFees[stream])} · Transport ${fmt(termFeesTransport[stream])}`} />
+                 <StatCard label="Enrolled"    value={String(stats.count)} hint={`Day ${fmt(globalFees.dayBase)} · Boarder ${fmt(globalFees.boarderBase)}`} />
                   <StatCard label="Expected"    value={fmt(stats.expected)} />
                   <StatCard label="Collected"   value={fmt(stats.collected)} accent="success" hint={`${Math.round((stats.collected / (stats.expected || 1)) * 100)}%`} />
                   <StatCard label="Outstanding" value={fmt(stats.debt)} accent="danger" />
@@ -591,13 +666,20 @@ export default function Dashboard() {
                       {classStudents.map((s, i) => (
                         <tr key={s.id}>
                           <td className="row-num">{i + 1}</td>
-                          <td className="name-cell">{s.name}</td>
+                          <td className="name-cell">
+  {s.name}
+  {s.walletBalance > 0 && (
+    <span style={{ marginLeft: "8px", fontSize: "0.7rem", padding: "2px 6px", background: "#dcfce7", color: "#166534", borderRadius: "4px" }}>
+      +{fmt(s.walletBalance)} Wallet
+    </span>
+  )}
+</td>
                           <td className="muted-cell">{s.guardian ?? "—"}</td>
                           <td>
-                            <span className={`transport-badge transport-badge--${s.usesTransport ? "yes" : "no"}`}>
-                              {s.usesTransport ? "🚌 Transport" : "🚶 Day"}
-                            </span>
-                          </td>
+  <span className={`transport-badge transport-badge--${s.type === 'Day' ? "no" : "yes"}`}>
+    {s.type === 'Boarder' ? "🛏️ Boarder" : s.type === 'Transport' ? "🚌 Transport" : "🚶 Day"}
+  </span>
+</td>
                           <td className="num">{fmt(s.expectedFees)}</td>
                           <td className="num">{fmt(s.paid)}</td>
                           <td className="num">
@@ -667,6 +749,12 @@ export default function Dashboard() {
           {/* UNALLOCATED */}
           {!loading && page === "unallocated" && (
             <UnallocatedPage entries={unallocated} students={students} onAdd={addUnallocated} onAllocate={allocateUnallocated} />
+
+          )
+           }
+           {/* UNIFORM SALES */}
+          {!loading && page === "uniforms" && (
+            <UniformsPage globalFees={globalFees} students={students} onRecord={recordTx} />
           )}
         </main>
       </div>
@@ -947,7 +1035,7 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
                       onClick={() => setStudentId(s.id)}>
                       <span className="student-row-name">{s.name}</span>
                       <span className="student-row-meta">
-                        {s.usesTransport ? "🚌 Transport" : "🚶 Day"}{s.guardian ? ` · Guardian: ${s.guardian}` : ""}
+                       s.type === 'Boarder' ? "🛏️ Boarder" : s.type === 'Transport' ? "🚌 Transport" : "🚶 Day"
                       </span>
                     </button>
                   ))}
@@ -994,20 +1082,31 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// BULK ADD STUDENT MODAL — NOW WITH TRANSPORT TOGGLE
+// BULK ADD STUDENT MODAL — UPDATED WITH BOARDING, PHONE, AND REGISTRATION LOGIC
 // ═══════════════════════════════════════════════════════════════════════════════
+
 type StudentDraft = {
-  name:          string;
-  stream:        Stream;
-  guardian:      string;
-  usesTransport: boolean;   // NEW
+  name:     string;
+  stream:   Stream;
+  guardian: string;
+  phone:    string;      // NEW
+  type:     StudentType; // NEW: "Day" | "Transport" | "Boarder"
+  isNew:    boolean;     // NEW
 };
 
 function BulkAddStudentModal({ defaultStream, onAdd }: {
   defaultStream?: Stream;
-  onAdd: (students: Array<Omit<Student, "id" | "expectedFees">>) => void;
+  onAdd: (students: Array<Omit<Student, "id" | "expectedFees" | "walletBalance"> & { isNew: boolean }>) => void;
 }) {
-  const blank = (): StudentDraft => ({ name: "", stream: defaultStream ?? "PP1", guardian: "", usesTransport: false });
+  const blank = (): StudentDraft => ({ 
+    name: "", 
+    stream: defaultStream ?? "PP1", 
+    guardian: "", 
+    phone: "", 
+    type: defaultStream === "Class 7" ? "Boarder" : "Day", 
+    isNew: true 
+  });
+  
   const [open, setOpen]     = useState(false);
   const [drafts, setDrafts] = useState<StudentDraft[]>([blank()]);
 
@@ -1021,10 +1120,12 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
     const valid = drafts.filter(d => d.name.trim());
     if (valid.length === 0) { toast.error("Enter at least one student name"); return; }
     onAdd(valid.map(d => ({
-      name:          d.name.trim(),
-      stream:        d.stream,
-      guardian:      d.guardian.trim() || undefined,
-      usesTransport: d.usesTransport,
+      name:     d.name.trim(),
+      stream:   d.stream,
+      guardian: d.guardian.trim() || undefined,
+      phone:    d.phone.trim() || undefined,
+      type:     d.stream === "Class 7" ? "Boarder" : d.type, // Security override
+      isNew:    d.isNew,
     })));
     setOpen(false);
     setDrafts([blank()]);
@@ -1035,20 +1136,24 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
   return (
     <>
       <style>{`
-        .modal--bulk { max-width: 820px; width: 96vw; }
+        .modal--bulk { max-width: 1050px; width: 96vw; }
         .bulk-hint { font-size:.8rem; color:var(--c-text-3,#888); margin:0 0 1rem; }
         .bulk-table { display:flex; flex-direction:column; gap:.4rem; margin-bottom:.75rem; }
-        /* grid: name | class | guardian | transport | remove */
+        
+        /* New Grid: Name | Class | Guardian | Phone | Type | New? | Remove */
         .bulk-header,
-        .bulk-row    { display:grid; grid-template-columns:1fr 110px 1fr 130px 28px; gap:.5rem; align-items:center; }
+        .bulk-row    { display:grid; grid-template-columns: 1.5fr 100px 1.2fr 1fr 120px 60px 28px; gap:.5rem; align-items:center; }
         .bulk-header { font-size:.65rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
                         color:var(--c-text-3,#999); padding:0 2px; }
+        
         .bulk-input, .bulk-select {
           width:100%; padding:.42rem .6rem; border:1px solid var(--c-border,#dde1e7);
           border-radius:6px; font-size:.85rem; background:var(--c-surface,#fff);
           color:var(--c-text,#111); outline:none; transition:border-color .15s;
         }
         .bulk-input:focus,.bulk-select:focus { border-color:var(--c-primary,#2563eb); }
+        .bulk-select:disabled { background: #f1f5f9; cursor: not-allowed; color: #64748b; }
+        
         .bulk-remove {
           display:flex; align-items:center; justify-content:center;
           width:28px; height:28px; border:none; border-radius:6px; cursor:pointer;
@@ -1056,6 +1161,7 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
         }
         .bulk-remove:hover:not(:disabled) { background:#fee2e2; }
         .bulk-remove:disabled { opacity:.3; cursor:default; }
+        
         .bulk-add-row {
           display:inline-flex; align-items:center; gap:.3rem; font-size:.82rem;
           color:var(--c-primary,#2563eb); background:none; border:none; cursor:pointer;
@@ -1063,28 +1169,8 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
         }
         .bulk-add-row:hover { text-decoration:underline; }
 
-        /* Transport toggle pill */
-        .transport-toggle {
-          display: flex; align-items: center; gap: .35rem;
-          font-size: .78rem; font-weight: 600; cursor: pointer;
-          user-select: none;
-        }
-        .transport-toggle input[type=checkbox] { display:none; }
-        .transport-pill {
-          display: inline-flex; align-items: center; gap: .3rem;
-          padding: .25rem .6rem; border-radius: 999px; border: 1.5px solid;
-          transition: background .15s, color .15s, border-color .15s;
-          white-space: nowrap; font-size: .75rem;
-        }
-        .transport-pill--off  { background: #f1f5f9; color: #64748b; border-color: #cbd5e1; }
-        .transport-pill--on   { background: #eff6ff; color: #1d4ed8; border-color: #93c5fd; }
-
-        /* Transport badge in table */
-        .transport-badge { display:inline-flex; align-items:center; gap:.25rem;
-          font-size:.72rem; font-weight:700; padding:.15rem .5rem; border-radius:999px; }
-        .transport-badge--yes { background:#eff6ff; color:#1d4ed8; border:1px solid #93c5fd; }
-        .transport-badge--no  { background:#f8fafc; color:#64748b; border:1px solid #cbd5e1; }
-        .student-row-meta { font-size:.72rem; color:var(--c-text-3,#888); }
+        .checkbox-cell { display: flex; justify-content: center; }
+        .checkbox-cell input { width: 16px; height: 16px; cursor: pointer; }
       `}</style>
 
       <button className="btn-outline" onClick={() => setOpen(true)}>+ Add Student</button>
@@ -1097,14 +1183,16 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
               <button className="modal-close" onClick={close}>✕</button>
             </div>
 
-            <p className="bulk-hint">Add one or more students. Each row is one student.</p>
+            <p className="bulk-hint">Add one or more students. Check "New" to automatically apply registration & caution fees.</p>
 
             <div className="bulk-table">
               <div className="bulk-header">
                 <span>Full Name <span className="required">*</span></span>
                 <span>Class</span>
-                <span>Guardian <span className="optional">(optional)</span></span>
-                <span>Student Type</span>
+                <span>Guardian</span>
+                <span>Phone</span>
+                <span>Type</span>
+                <span style={{textAlign: "center"}}>New?</span>
                 <span></span>
               </div>
 
@@ -1117,7 +1205,14 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
 
                   {/* Class */}
                   <select className="bulk-select" value={d.stream}
-                    onChange={e => setField(i, "stream", e.target.value as Stream)}>
+                    onChange={e => {
+                      const newStream = e.target.value as Stream;
+                      setField(i, "stream", newStream);
+                      // Force Boarder if Class 7
+                      if (newStream === "Class 7") {
+                        setField(i, "type", "Boarder");
+                      }
+                    }}>
                     {STREAMS.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
 
@@ -1126,14 +1221,28 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
                     onChange={e => setField(i, "guardian", e.target.value)}
                     placeholder="e.g. Jane Doe" />
 
-                  {/* Transport toggle */}
-                  <label className="transport-toggle" title={d.usesTransport ? "Uses school transport" : "Day student (no transport)"}>
-                    <input type="checkbox" checked={d.usesTransport}
-                      onChange={e => setField(i, "usesTransport", e.target.checked)} />
-                    <span className={`transport-pill transport-pill--${d.usesTransport ? "on" : "off"}`}>
-                      {d.usesTransport ? "🚌 Transport" : "🚶 Day only"}
-                    </span>
-                  </label>
+                  {/* Phone */}
+                  <input className="bulk-input" value={d.phone} type="tel"
+                    onChange={e => setField(i, "phone", e.target.value)}
+                    placeholder="07XX..." />
+
+                  {/* Student Type */}
+                  <select 
+                    className="bulk-select" 
+                    value={d.type}
+                    disabled={d.stream === "Class 7"}
+                    title={d.stream === "Class 7" ? "Class 7 students must be Boarders" : ""}
+                    onChange={e => setField(i, "type", e.target.value as StudentType)}>
+                    <option value="Day">Day Scholar</option>
+                    <option value="Transport">Transport</option>
+                    <option value="Boarder">Boarder</option>
+                  </select>
+
+                  {/* Is New Toggle */}
+                  <div className="checkbox-cell" title="Applies Registration and Caution fees">
+                    <input type="checkbox" checked={d.isNew} 
+                      onChange={e => setField(i, "isNew", e.target.checked)} />
+                  </div>
 
                   {/* Remove row */}
                   <button className="bulk-remove" onClick={() => removeRow(i)}
@@ -1157,137 +1266,124 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
     </>
   );
 }
-
 // ═══════════════════════════════════════════════════════════════════════════════
-// EDIT FEES MODAL — TWO COLUMNS: DAY vs DAY + TRANSPORT
+// ═══════════════════════════════════════════════════════════════════════════════
+// EDIT FEES MODAL
 // ═══════════════════════════════════════════════════════════════════════════════
 function EditFeesModal({
-  termFees, termFeesTransport, onUpdate,
+  globalFees, onUpdateFees,
 }: {
-  termFees:          TermFeeMap;
-  termFeesTransport: TermFeeTransportMap;
-  onUpdate: (stream: Stream, bucket: "base" | "transport", amount: number) => Promise<void> | void;
+  globalFees: GlobalFees;
+  onUpdateFees: (newFees: GlobalFees) => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState<GlobalFees>(globalFees);
 
-  // Draft state for both buckets per stream
-  const [draftsBase, setDraftsBase] = useState<Record<Stream, string>>(
-    () => Object.fromEntries(STREAMS.map(s => [s, String(termFees[s])])) as Record<Stream, string>
-  );
-  const [draftsTransport, setDraftsTransport] = useState<Record<Stream, string>>(
-    () => Object.fromEntries(STREAMS.map(s => [s, String(termFeesTransport[s])])) as Record<Stream, string>
-  );
-
-  const openModal = () => {
-    setDraftsBase(Object.fromEntries(STREAMS.map(s => [s, String(termFees[s])])) as Record<Stream, string>);
-    setDraftsTransport(Object.fromEntries(STREAMS.map(s => [s, String(termFeesTransport[s])])) as Record<Stream, string>);
-    setOpen(true);
-  };
+  const openModal = () => { setDraft(globalFees); setOpen(true); };
 
   const saveAll = async () => {
-    for (const s of STREAMS) {
-      const base      = Number(draftsBase[s]);
-      const transport = Number(draftsTransport[s]);
-      if (!base      || base <= 0)      { toast.error(`Invalid day fee for ${s}`);       return; }
-      if (!transport || transport <= 0) { toast.error(`Invalid transport fee for ${s}`); return; }
-      if (transport < base)             { toast.error(`Transport fee for ${s} should be ≥ day fee`); return; }
-    }
-    for (const s of STREAMS) {
-      await onUpdate(s, "base",      Number(draftsBase[s]));
-      await onUpdate(s, "transport", Number(draftsTransport[s]));
-    }
+    await onUpdateFees(draft);
     setOpen(false);
-    toast.success("All term fees updated");
   };
+
+  const updateDraft = (key: keyof GlobalFees, val: number) => setDraft(p => ({ ...p, [key]: val }));
+  
+  const updateUniform = (key: keyof GlobalFees["uniforms"], val: number) => 
+    setDraft(p => ({ ...p, uniforms: { ...p.uniforms, [key]: val } }));
+
+  const updateBoysUniform = (key: keyof GlobalFees["uniforms"]["boys"], val: number) => 
+    setDraft(p => ({ ...p, uniforms: { ...p.uniforms, boys: { ...p.uniforms.boys, [key]: val } } }));
+
+  const updateGirlsUniform = (key: keyof GlobalFees["uniforms"]["girls"], val: number) => 
+    setDraft(p => ({ ...p, uniforms: { ...p.uniforms, girls: { ...p.uniforms.girls, [key]: val } } }));
 
   return (
     <>
-      <style>{`
-        .fees-modal { max-width: 640px; width: 95vw; }
-        .fees-cols-header {
-          display: grid; grid-template-columns: 110px 1fr 1fr;
-          gap: .5rem; margin-bottom: .5rem; padding: 0 2px;
-          font-size: .65rem; font-weight: 700; letter-spacing: .1em;
-          text-transform: uppercase; color: var(--c-text-3, #888);
-        }
-        .fees-cols-header span:nth-child(2) { color: #475569; }
-        .fees-cols-header span:nth-child(3) { color: #1d4ed8; }
-        .fees-row {
-          display: grid; grid-template-columns: 110px 1fr 1fr;
-          gap: .5rem; align-items: center; padding: .35rem 0;
-          border-bottom: 1px solid var(--c-border, #eee);
-        }
-        .fees-row:last-child { border-bottom: none; }
-        .fees-stream { font-weight: 600; font-size: .88rem; }
-        .fees-input {
-          width: 100%; padding: .42rem .6rem; border: 1px solid var(--c-border, #dde1e7);
-          border-radius: 6px; font-size: .85rem; outline: none; transition: border-color .15s;
-          background: var(--c-surface, #fff); color: var(--c-text, #111);
-        }
-        .fees-input:focus { border-color: var(--c-primary, #2563eb); }
-        .fees-input--transport { border-color: #bfdbfe; background: #f0f9ff; }
-        .fees-input--transport:focus { border-color: #3b82f6; }
-        .fees-hint {
-          font-size: .73rem; color: var(--c-text-3, #888);
-          margin: .75rem 0 1.25rem;
-          padding: .55rem .75rem;
-          background: #f8fafc;
-          border-radius: 6px;
-          border-left: 3px solid #94a3b8;
-        }
-      `}</style>
-
-      <button className="btn-outline" onClick={openModal}>Edit Term Fees</button>
+      <button className="btn-outline" onClick={openModal}>⚙️ Edit Fees & Uniforms</button>
 
       {open && (
         <div className="modal-overlay" onClick={() => setOpen(false)}>
-          <div className="modal fees-modal" onClick={e => e.stopPropagation()}>
+          <div className="modal" style={{ maxWidth: "800px", width: "95vw" }} onClick={e => e.stopPropagation()}>
             <div className="modal-head">
-              <h3>Base Term Fees — {CURRENT_TERM.label}</h3>
+              <h3>Edit Global Fees & Pricing</h3>
               <button className="modal-close" onClick={() => setOpen(false)}>✕</button>
             </div>
 
-            <p className="fees-hint">
-              <strong>Day student</strong> — attends school but uses own transport.<br />
-              <strong>Day + Transport</strong> — uses the school bus. This fee must be ≥ the day fee.
-            </p>
+            <div className="scrollable-content" style={{ maxHeight: "65vh", overflowY: "auto", paddingRight: "10px" }}>
+              
+              <h4 style={{ margin: "1rem 0 .5rem" }}>School Fees (Per Term / Installment)</h4>
+              <div className="form-grid">
+                <div className="form-field"><label>Day Scholar (No Transport)</label>
+                  <input type="number" value={draft.dayBase} onChange={e => updateDraft("dayBase", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Day Scholar (With Transport)</label>
+                  <input type="number" value={draft.transportBase} onChange={e => updateDraft("transportBase", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Boarding Fees</label>
+                  <input type="number" value={draft.boarderBase} onChange={e => updateDraft("boarderBase", Number(e.target.value))} /></div>
+              </div>
 
-            {/* Two-column header */}
-            <div className="fees-cols-header">
-              <span>Class</span>
-              <span>🚶 Day student (TZS)</span>
-              <span>🚌 Day + Transport (TZS)</span>
+              <h4 style={{ margin: "1rem 0 .5rem" }}>Tuition & Mandatory Fees</h4>
+              <div className="form-grid">
+                <div className="form-field"><label>Tuition (Boarders - Cls 4 & 7)</label>
+                  <input type="number" value={draft.tuitionBoarder} onChange={e => updateDraft("tuitionBoarder", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Tuition (Day - Cls 4)</label>
+                  <input type="number" value={draft.tuitionDay} onChange={e => updateDraft("tuitionDay", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Library Fee</label>
+                  <input type="number" value={draft.library} onChange={e => updateDraft("library", Number(e.target.value))} /></div>
+              </div>
+
+              <h4 style={{ margin: "1rem 0 .5rem" }}>New Registration Fees</h4>
+              <div className="form-grid">
+                <div className="form-field"><label>Registration Fee</label>
+                  <input type="number" value={draft.registration} onChange={e => updateDraft("registration", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Caution Fee</label>
+                  <input type="number" value={draft.caution} onChange={e => updateDraft("caution", Number(e.target.value))} /></div>
+              </div>
+
+              <h4 style={{ margin: "1rem 0 .5rem" }}>Uniform Sets</h4>
+              <div className="form-grid">
+                <div className="form-field"><label>Full Uniform (Class 1-7)</label>
+                  <input type="number" value={draft.uniforms.fullUpper} onChange={e => updateUniform("fullUpper", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Full Uniform (PP1-PP2)</label>
+                  <input type="number" value={draft.uniforms.fullLower} onChange={e => updateUniform("fullLower", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Tracksuit</label>
+                  <input type="number" value={draft.uniforms.tracksuit} onChange={e => updateUniform("tracksuit", Number(e.target.value))} /></div>
+              </div>
+              
+              <h4 style={{ margin: "1.5rem 0 .5rem", color: "var(--c-primary)" }}>Boys Uniform Pricing</h4>
+              <div className="form-grid">
+                <div className="form-field"><label>Sweater</label>
+                  <input type="number" value={draft.uniforms.boys.sweater} onChange={e => updateBoysUniform("sweater", Number(e.target.value))} /></div>
+                <div className="form-field"><label>T-Shirt</label>
+                  <input type="number" value={draft.uniforms.boys.tshirt} onChange={e => updateBoysUniform("tshirt", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Socks</label>
+                  <input type="number" value={draft.uniforms.boys.socks} onChange={e => updateBoysUniform("socks", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Khaki Shorts</label>
+                  <input type="number" value={draft.uniforms.boys.khakiShorts} onChange={e => updateBoysUniform("khakiShorts", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Green Shorts</label>
+                  <input type="number" value={draft.uniforms.boys.greenShorts} onChange={e => updateBoysUniform("greenShorts", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Weekend Wear</label>
+                  <input type="number" value={draft.uniforms.boys.weekend} onChange={e => updateBoysUniform("weekend", Number(e.target.value))} /></div>
+              </div>
+
+              <h4 style={{ margin: "1.5rem 0 .5rem", color: "var(--c-primary)" }}>Girls Uniform Pricing</h4>
+              <div className="form-grid">
+                <div className="form-field"><label>Sweater</label>
+                  <input type="number" value={draft.uniforms.girls.sweater} onChange={e => updateGirlsUniform("sweater", Number(e.target.value))} /></div>
+                <div className="form-field"><label>T-Shirt</label>
+                  <input type="number" value={draft.uniforms.girls.tshirt} onChange={e => updateGirlsUniform("tshirt", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Socks</label>
+                  <input type="number" value={draft.uniforms.girls.socks} onChange={e => updateGirlsUniform("socks", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Skirt</label>
+                  <input type="number" value={draft.uniforms.girls.skirt} onChange={e => updateGirlsUniform("skirt", Number(e.target.value))} /></div>
+                <div className="form-field"><label>Weekend Wear</label>
+                  <input type="number" value={draft.uniforms.girls.weekend} onChange={e => updateGirlsUniform("weekend", Number(e.target.value))} /></div>
+              </div>
+
             </div>
 
-            <div className="fees-grid">
-              {STREAMS.map(s => (
-                <div key={s} className="fees-row">
-                  <span className="fees-stream">{s}</span>
-
-                  {/* Base / day fee */}
-                  <input
-                    className="fees-input"
-                    type="number"
-                    min="0"
-                    value={draftsBase[s]}
-                    onChange={e => setDraftsBase(p => ({ ...p, [s]: e.target.value }))}
-                  />
-
-                  {/* Transport fee */}
-                  <input
-                    className="fees-input fees-input--transport"
-                    type="number"
-                    min="0"
-                    value={draftsTransport[s]}
-                    onChange={e => setDraftsTransport(p => ({ ...p, [s]: e.target.value }))}
-                  />
-                </div>
-              ))}
-            </div>
-
-            <div className="form-actions">
+            <div className="form-actions" style={{ marginTop: "1.5rem" }}>
               <button className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
-              <button className="btn-primary" onClick={saveAll}>Save All Fees</button>
+              <button className="btn-primary" onClick={saveAll}>Save Master Fees</button>
             </div>
           </div>
         </div>
@@ -1295,26 +1391,26 @@ function EditFeesModal({
     </>
   );
 }
-
 // ── Edit Student Modal (now includes transport toggle) ────────────────────────
 function EditStudentModal({ student, onSave }: { student: Student; onSave: (s: Student) => void }) {
-  const [open,          setOpen]          = useState(false);
-  const [name,          setName]          = useState(student.name);
-  const [guardian,      setGuardian]      = useState(student.guardian ?? "");
-  const [fees,          setFees]          = useState(String(student.expectedFees));
-  const [usesTransport, setUsesTransport] = useState(student.usesTransport);
+  const [open,     setOpen]     = useState(false);
+  const [name,     setName]     = useState(student.name);
+  const [guardian, setGuardian] = useState(student.guardian ?? "");
+  const [phone,    setPhone]    = useState(student.phone ?? "");
+  const [fees,     setFees]     = useState(String(student.expectedFees));
+  const [type,     setType]     = useState<StudentType>(student.type);
 
   const submit = () => {
     if (!name.trim() || !Number(fees)) { toast.error("Name and fees required"); return; }
-    onSave({ ...student, name: name.trim(), guardian: guardian.trim() || undefined, expectedFees: Number(fees), usesTransport });
+    onSave({ ...student, name: name.trim(), guardian: guardian.trim() || undefined, phone: phone.trim() || undefined, expectedFees: Number(fees), type });
     setOpen(false);
   };
 
   return (
     <>
       <button className="action-btn" onClick={() => {
-        setOpen(true); setName(student.name); setGuardian(student.guardian ?? "");
-        setFees(String(student.expectedFees)); setUsesTransport(student.usesTransport);
+        setOpen(true); setName(student.name); setGuardian(student.guardian ?? ""); setPhone(student.phone ?? "");
+        setFees(String(student.expectedFees)); setType(student.type);
       }}>Edit</button>
       {open && (
         <div className="modal-overlay" onClick={() => setOpen(false)}>
@@ -1324,31 +1420,18 @@ function EditStudentModal({ student, onSave }: { student: Student; onSave: (s: S
               <button className="modal-close" onClick={() => setOpen(false)}>✕</button>
             </div>
             <div className="form-grid">
-              <div className="form-field form-field--full">
-                <label>Full Name</label>
-                <input value={name} onChange={e => setName(e.target.value)} />
-              </div>
-              <div className="form-field form-field--full">
-                <label>Guardian <span className="optional">(optional)</span></label>
-                <input value={guardian} onChange={e => setGuardian(e.target.value)} />
-              </div>
+              <div className="form-field form-field--full"><label>Full Name</label><input value={name} onChange={e => setName(e.target.value)} /></div>
+              <div className="form-field"><label>Guardian</label><input value={guardian} onChange={e => setGuardian(e.target.value)} /></div>
+              <div className="form-field"><label>Phone</label><input value={phone} onChange={e => setPhone(e.target.value)} /></div>
               <div className="form-field form-field--full">
                 <label>Student Type</label>
-                <label className="transport-toggle" style={{ marginTop: ".25rem" }}>
-                  <input type="checkbox" style={{ display: "none" }} checked={usesTransport}
-                    onChange={e => setUsesTransport(e.target.checked)} />
-                  <span className={`transport-pill transport-pill--${usesTransport ? "on" : "off"}`}>
-                    {usesTransport ? "🚌 Day + Transport" : "🚶 Day only (no transport)"}
-                  </span>
-                  <span style={{ fontSize: ".75rem", color: "var(--c-text-3,#888)", marginLeft: ".35rem" }}>
-                    (click to toggle)
-                  </span>
-                </label>
+                <select className="bulk-select" value={type} onChange={e => setType(e.target.value as StudentType)}>
+                  <option value="Day">Day Scholar</option>
+                  <option value="Transport">Day + Transport</option>
+                  <option value="Boarder">Boarder</option>
+                </select>
               </div>
-              <div className="form-field form-field--full">
-                <label>Expected Fees (TZS)</label>
-                <input type="number" value={fees} onChange={e => setFees(e.target.value)} />
-              </div>
+              <div className="form-field form-field--full"><label>Expected Fees (TZS)</label><input type="number" value={fees} onChange={e => setFees(e.target.value)} /></div>
             </div>
             <div className="form-actions">
               <button className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
@@ -1438,7 +1521,9 @@ function AllocateInline({ entryId: _entryId, students, onAllocate }: { entryId: 
                     <button key={s.id} className={`student-row${studentId === s.id ? " student-row--active" : ""}`}
                       onClick={() => setStudentId(s.id)}>
                       <span className="student-row-name">{s.name}</span>
-                      <span className="student-row-meta">{s.usesTransport ? "🚌 Transport" : "🚶 Day"}</span>
+                      <span className="student-row-meta">
+  {s.type === 'Boarder' ? "🛏️ Boarder" : s.type === 'Transport' ? "🚌 Transport" : "🚶 Day"}
+</span>
                     </button>
                   ))}
                   {streamStudents.length === 0 && <div className="student-list-empty">No students found.</div>}
@@ -1496,7 +1581,7 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
             <tr><td>Date</td><td>{tx.date}</td></tr>
             {student && <tr><td>Student</td><td>{student.name}</td></tr>}
             {student && <tr><td>Class</td><td>{student.stream}</td></tr>}
-            {student && <tr><td>Student Type</td><td>{student.usesTransport ? "Day + Transport" : "Day only"}</td></tr>}
+            {student && <tr><td>Student Type</td><td>{student.type}</td></tr>}
             {student?.guardian && <tr><td>Guardian</td><td>{student.guardian}</td></tr>}
             <tr><td>Method</td><td>{tx.method}</td></tr>
             {tx.reference && <tr><td>Reference</td><td><span className="mono-cell">{tx.reference}</span></td></tr>}
@@ -1514,6 +1599,202 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
           <button className="btn-ghost" onClick={onClose}>Close</button>
           <button className="btn-primary" onClick={print}>Print Receipt</button>
         </div>
+      </div>
+    </div>
+  );
+
+}
+// ═══════════════════════════════════════════════════════════════════════════════
+// UNIFORM SALES (POINT OF SALE)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// 1. Moved outside so React doesn't destroy and recreate it on every keystroke!
+function ItemBtn({ 
+  label, priceKey, category, globalFees, onAdd 
+}: { 
+  label: string; 
+  priceKey: string; 
+  category?: "boys" | "girls"; 
+  globalFees: GlobalFees; 
+  onAdd: (name: string, price: number) => void; 
+}) {
+  let price = 0;
+  if (category === "boys") price = globalFees.uniforms.boys[priceKey as keyof typeof globalFees.uniforms.boys];
+  else if (category === "girls") price = globalFees.uniforms.girls[priceKey as keyof typeof globalFees.uniforms.girls];
+  else price = globalFees.uniforms[priceKey as keyof typeof globalFees.uniforms] as number;
+
+  return (
+    <button className="class-card" style={{ padding: "1rem", textAlign: "left" }} onClick={() => onAdd(label, price)}>
+      <div style={{ fontWeight: 600, fontSize: "0.9rem" }}>{label}</div>
+      <div style={{ color: "var(--c-primary)", fontSize: "0.85rem", marginTop: "4px" }}>{fmt(price)}</div>
+    </button>
+  );
+}
+
+// 2. The main page component
+function UniformsPage({ globalFees, students, onRecord }: { 
+  globalFees: GlobalFees; 
+  students: Student[]; 
+  onRecord: (t: Omit<Transaction, "id">) => void;
+}) {
+  const [studentId, setStudentId]         = useState("");
+  const [studentSearch, setStudentSearch] = useState("");
+  const [method, setMethod]               = useState<PaymentMethod>("Cash");
+  const [reference, setReference]         = useState("");
+  const [cart, setCart]                   = useState<{ name: string; price: number; qty: number }[]>([]);
+
+  // Filter students for the dropdown
+  const filteredStudents = useMemo(() => {
+    const q = studentSearch.trim().toLowerCase();
+    if (!q) return students.slice(0, 50); // Show first 50 if no search
+    return students.filter(s => s.name.toLowerCase().includes(q)).slice(0, 50);
+  }, [students, studentSearch]);
+
+  const addToCart = (name: string, price: number) => {
+    if (price <= 0) { toast.error("Price not set in Global Fees"); return; }
+    setCart(prev => {
+      const existing = prev.find(item => item.name === name);
+      if (existing) return prev.map(item => item.name === name ? { ...item, qty: item.qty + 1 } : item);
+      return [...prev, { name, price, qty: 1 }];
+    });
+  };
+
+  const removeFromCart = (name: string) => {
+    setCart(prev => prev.filter(item => item.name !== name));
+  };
+
+  const cartTotal = cart.reduce((sum, item) => sum + (item.price * item.qty), 0);
+
+  const handleCheckout = () => {
+    if (!studentId) { toast.error("Please select a student"); return; }
+    if (cart.length === 0) { toast.error("Cart is empty"); return; }
+
+    const itemNames = cart.map(c => `${c.qty}x ${c.name}`).join(", ");
+    
+    onRecord({
+      date: new Date().toISOString().slice(0, 10),
+      studentId,
+      amount: cartTotal,
+      method,
+      reference: reference || undefined,
+      receivedBy: "Bursar",
+      notes: `Uniform Sale: ${itemNames}`
+    });
+
+    toast.success("Uniform sale recorded!");
+    setCart([]);
+    setStudentId("");
+    setStudentSearch("");
+    setReference("");
+  };
+
+  return (
+    <div className="fade-in" style={{ display: "grid", gridTemplateColumns: "1fr 350px", gap: "1.5rem", alignItems: "start" }}>
+      
+      {/* LEFT: Item Selection */}
+      <div>
+        <div className="section-head"><h2 className="section-title">Uniform Items</h2></div>
+        
+        <h4 style={{ margin: "0 0 1rem", color: "var(--c-text-2)" }}>Full Sets</h4>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "10px", marginBottom: "2rem" }}>
+          <ItemBtn label="Full Uniform (Upper)" priceKey="fullUpper" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Full Uniform (Lower)" priceKey="fullLower" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Tracksuit" priceKey="tracksuit" globalFees={globalFees} onAdd={addToCart} />
+        </div>
+
+        <h4 style={{ margin: "0 0 1rem", color: "var(--c-text-2)" }}>Boys Individual Items</h4>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "10px", marginBottom: "2rem" }}>
+          <ItemBtn label="Sweater (Boys)" category="boys" priceKey="sweater" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="T-Shirt (Boys)" category="boys" priceKey="tshirt" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Socks (Boys)" category="boys" priceKey="socks" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Khaki Shorts" category="boys" priceKey="khakiShorts" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Green Shorts" category="boys" priceKey="greenShorts" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Weekend Wear" category="boys" priceKey="weekend" globalFees={globalFees} onAdd={addToCart} />
+        </div>
+
+        <h4 style={{ margin: "0 0 1rem", color: "var(--c-text-2)" }}>Girls Individual Items</h4>
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: "10px" }}>
+          <ItemBtn label="Sweater (Girls)" category="girls" priceKey="sweater" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="T-Shirt (Girls)" category="girls" priceKey="tshirt" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Socks (Girls)" category="girls" priceKey="socks" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Skirt" category="girls" priceKey="skirt" globalFees={globalFees} onAdd={addToCart} />
+          <ItemBtn label="Weekend Wear" category="girls" priceKey="weekend" globalFees={globalFees} onAdd={addToCart} />
+        </div>
+      </div>
+
+      {/* RIGHT: Cart & Checkout */}
+      <div className="form-card" style={{ position: "sticky", top: "2rem" }}>
+        <h3 style={{ margin: "0 0 1rem", borderBottom: "1px solid var(--c-border)", paddingBottom: "1rem" }}>Current Sale</h3>
+        
+        {/* Student Search */}
+        <div className="form-field">
+          <label>Select Student <span className="required">*</span></label>
+          <input 
+            placeholder="Search name..." 
+            value={studentSearch} 
+            onChange={e => { setStudentSearch(e.target.value); setStudentId(""); }}
+            style={{ marginBottom: "0.5rem" }}
+          />
+          {studentSearch && !studentId && (
+            <div className="student-list" style={{ maxHeight: "150px" }}>
+              {filteredStudents.map(s => (
+                <button key={s.id} className="student-row" onClick={() => { setStudentId(s.id); setStudentSearch(s.name); }}>
+                  {s.name} <span className="student-row-meta">{s.stream}</span>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* Cart Items */}
+        <div style={{ minHeight: "150px", margin: "1.5rem 0", padding: "1rem", background: "var(--c-bg)", borderRadius: "8px" }}>
+          {cart.length === 0 ? (
+            <div style={{ color: "var(--c-text-3)", textAlign: "center", marginTop: "3rem", fontSize: "0.9rem" }}>Cart is empty</div>
+          ) : (
+            cart.map((item, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "0.75rem", fontSize: "0.9rem" }}>
+                <div>
+                  <span style={{ fontWeight: 600, marginRight: "8px" }}>{item.qty}x</span>
+                  {item.name}
+                </div>
+                <div style={{ display: "flex", alignItems: "center", gap: "10px" }}>
+                  <span>{fmt(item.price * item.qty)}</span>
+                  <button onClick={() => removeFromCart(item.name)} style={{ background: "none", border: "none", color: "var(--c-danger)", cursor: "pointer" }}>✕</button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+
+        {/* Checkout Controls */}
+        <div className="form-grid">
+          <div className="form-field">
+            <label>Method</label>
+            <select value={method} onChange={e => setMethod(e.target.value as PaymentMethod)}>
+              <option value="Cash">Cash</option><option value="Bank Transfer">Bank Transfer</option>
+            </select>
+          </div>
+          {method === "Bank Transfer" && (
+            <div className="form-field">
+              <label>Reference</label>
+              <input value={reference} onChange={e => setReference(e.target.value)} placeholder="Slip No..." />
+            </div>
+          )}
+        </div>
+
+        <div style={{ display: "flex", justifyContent: "space-between", fontSize: "1.2rem", fontWeight: 700, margin: "1.5rem 0 1rem" }}>
+          <span>Total:</span>
+          <span style={{ color: "var(--c-primary)" }}>{fmt(cartTotal)}</span>
+        </div>
+
+        <button 
+          className="btn-primary" 
+          style={{ width: "100%", padding: "0.75rem" }} 
+          disabled={cart.length === 0 || !studentId}
+          onClick={handleCheckout}
+        >
+          Complete Sale
+        </button>
       </div>
     </div>
   );
