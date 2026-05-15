@@ -43,6 +43,7 @@ type Student = {
   type:          StudentType; // NEW
   expectedFees:  number;
   walletBalance: number;
+  enrolledAt:    string;
 };
 
 type PaymentMethod = "Bank Transfer" | "Cash";
@@ -114,30 +115,63 @@ function calculateExpectedFees(
   type: StudentType,
   isNew: boolean,
   globalFees: GlobalFees,
+  enrolledAt?: string // New parameter
 ): number {
-  let total = 0;
+  // eslint-disable-next-line no-useless-assignment
+  let annualBase = 0;
 
-  // 1. Annual school fees based on student type
-  if (type === "Boarder")        total += globalFees.boarderBase;
-  else if (type === "Transport") total += globalFees.transportBase;
-  else                           total += globalFees.dayBase;
+  // 1. Determine the full annual base
+  if (type === "Boarder")        annualBase = globalFees.boarderBase;
+  else if (type === "Transport") annualBase = globalFees.transportBase;
+  else                           annualBase = globalFees.dayBase;
 
-  // 2. Annual mandatory add-ons (library, caution — charged once a year)
+  // 2. Pro-rata logic
+  // Calculate how many installments they missed. 
+  // If they join in Installment 1, they miss 0. If join in Inst 3, they miss 2.
+  const joinInstallment = enrolledAt ? getInstallmentIndex(enrolledAt) : 1;
+  const installmentsToPay = (4 - joinInstallment) + 1; 
+  
+  const perInstallmentRate = annualBase / 4;
+  let total = perInstallmentRate * installmentsToPay;
+
+  // 3. Mandatory Add-ons (Library/Caution usually paid in full regardless of when joining)
   total += globalFees.library;
   total += globalFees.caution;
 
-  // 3. Tuition (July — Class 7 always boarder rate; Class 4 depends on type)
-  if (stream === "Class 7") {
-    total += globalFees.tuitionBoarder;
-  } else if (stream === "Class 4") {
-    total += (type === "Boarder") ? globalFees.tuitionBoarder : globalFees.tuitionDay;
+  // 4. Tuition (July - only applies if they are enrolled by July/Installment 3)
+  if (joinInstallment <= 3) {
+    if (stream === "Class 7") {
+      total += globalFees.tuitionBoarder;
+    } else if (stream === "Class 4") {
+      total += (type === "Boarder") ? globalFees.tuitionBoarder : globalFees.tuitionDay;
+    }
   }
 
-  // 4. One-off registration fee for new students
+  // 5. One-off registration fee
   if (isNew) total += globalFees.registration;
 
   return total;
 }
+
+// Helper to determine which installment a specific date falls into (1-4)
+// If a date falls outside these ranges (e.g., December), we treat it as having finished the year.
+function getInstallmentIndex(dateString: string): number {
+  const date = new Date(dateString);
+  const month = date.getMonth(); // 0 = Jan, 11 = Dec
+
+  // Installment 1: Jan 1 - Mar 31
+  if (month >= 0 && month <= 2) return 1;
+  // Installment 2: Apr 1 - Jun 30
+  if (month >= 3 && month <= 5) return 2;
+  // Installment 3: Jul 1 - Aug 31
+  if (month >= 6 && month <= 7) return 3;
+  // Installment 4: Sep 1 - Nov 30
+  if (month >= 8 && month <= 10) return 4;
+  
+  return 4; // Default to final installment for Dec
+}
+
+
 
 // ─── Academic year helper ────────────────────────────────────────────────────
 // Fees are annual — no per-term splitting. We only need the year label.
@@ -151,14 +185,16 @@ function getCurrentTerm(): TermLabel {
 const CURRENT_TERM = getCurrentTerm();
 
 // Map a StudentRow → Student UI type
-const studentFromRow = (r: StudentRow, globalFees: GlobalFees): Student => {
+const studentFromRow = (r: StudentRow & { enrolled_date?: string }, globalFees: GlobalFees): Student => {
   const classesObj = Array.isArray(r.classes) ? r.classes[0] : r.classes;
   const stream     = (classesObj?.name ?? "") as Stream;
   const type       = r.student_type ?? "Day";
   const stfFee     = r.student_term_fees?.[0]?.expected_fee;
+ const currentYear = new Date().getFullYear();
+const enrollmentDate = r.enrolled_date ?? `${currentYear}-01-01`;
 
   // Yearly baseline — no term number needed
-  const baseline     = calculateExpectedFees(stream, type, false, globalFees);
+  const baseline     = calculateExpectedFees(stream, type, false, globalFees, enrollmentDate);
   const expectedFees = stfFee != null ? stfFee : baseline;
 
   return {
@@ -170,6 +206,9 @@ const studentFromRow = (r: StudentRow, globalFees: GlobalFees): Student => {
     type,
     expectedFees,
     walletBalance: Number(r.wallet_balance || 0),
+    enrolledAt:    enrollmentDate, // <--- ADD THIS LINE
+    
+    
   };
 };
 
@@ -243,7 +282,7 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
           supabase.from("classes").select("id, name").order("sort_order"),
           supabase
             .from("students")
-            .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, classes(name), student_term_fees(expected_fee, term_id)")
+            .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, enrolled_date, classes(name), student_term_fees(expected_fee, term_id)")
             .eq("is_active", true)
             .order("full_name"),
           supabase
@@ -1087,20 +1126,26 @@ type StudentDraft = {
   guardian: string;
   phone:    string;      // NEW
   type:     StudentType; // NEW: "Day" | "Transport" | "Boarder"
-  isNew:    boolean;     // NEW
+  isNew:    boolean;
+  enrolledAt: string;     // NEW
 };
 
 function BulkAddStudentModal({ defaultStream, onAdd }: {
   defaultStream?: Stream;
-  onAdd: (students: Array<Omit<Student, "id" | "expectedFees" | "walletBalance"> & { isNew: boolean }>) => void;
+  onAdd: (students: Array<Omit<Student, "id" | "expectedFees" | "walletBalance"> & { isNew: boolean, enrolledAt: string }>) => void;
 }) {
+  // Change default from 'today' to January 1st
+  const currentYear = new Date().getFullYear();
+  const startOfYear = `${currentYear}-01-01`; 
+
   const blank = (): StudentDraft => ({ 
     name: "", 
     stream: defaultStream ?? "PP1", 
     guardian: "", 
     phone: "", 
     type: defaultStream === "Class 7" ? "Boarder" : "Day", 
-    isNew: true 
+    isNew: true,
+    enrolledAt: startOfYear // <--- Now defaults to Jan 1st
   });
   
   const [open, setOpen]     = useState(false);
@@ -1115,14 +1160,17 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
   const submit = () => {
     const valid = drafts.filter(d => d.name.trim());
     if (valid.length === 0) { toast.error("Enter at least one student name"); return; }
+    
     onAdd(valid.map(d => ({
-      name:     d.name.trim(),
-      stream:   d.stream,
-      guardian: d.guardian.trim() || undefined,
-      phone:    d.phone.trim() || undefined,
-      type:     d.stream === "Class 7" ? "Boarder" : d.type, // Security override
-      isNew:    d.isNew,
+      name:       d.name.trim(),
+      stream:     d.stream,
+      guardian:   d.guardian.trim() || undefined,
+      phone:      d.phone.trim() || undefined,
+      type:       d.stream === "Class 7" ? "Boarder" : d.type, 
+      isNew:      d.isNew,
+      enrolledAt: d.enrolledAt,
     })));
+    
     setOpen(false);
     setDrafts([blank()]);
   };
@@ -1132,41 +1180,41 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
   return (
     <>
       <style>{`
-        .modal--bulk { max-width: 1050px; width: 96vw; }
+        .modal--bulk { max-width: 1200px; width: 98vw; }
         .bulk-hint { font-size:.8rem; color:var(--c-text-3,#888); margin:0 0 1rem; }
-        .bulk-table { display:flex; flex-direction:column; gap:.4rem; margin-bottom:.75rem; }
+        .bulk-table { display:flex; flex-direction:column; gap:.4rem; margin-bottom:.75rem; overflow-x: auto; }
         
-        /* New Grid: Name | Class | Guardian | Phone | Type | New? | Remove */
+        /* Updated 8-column Grid: Name | Class | Guardian | Phone | Type | Date | New? | Remove */
         .bulk-header,
-        .bulk-row    { display:grid; grid-template-columns: 1.5fr 100px 1.2fr 1fr 120px 60px 28px; gap:.5rem; align-items:center; }
-        .bulk-header { font-size:.65rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
-                        color:var(--c-text-3,#999); padding:0 2px; }
+        .bulk-row { 
+          display:grid; 
+          grid-template-columns: 1.5fr 100px 1.2fr 1fr 120px 130px 50px 28px; 
+          gap:.5rem; 
+          align-items:center; 
+          min-width: 1000px;
+        }
+        
+        .bulk-header { 
+          font-size:.65rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+          color:var(--c-text-3,#999); padding:0 2px; 
+        }
         
         .bulk-input, .bulk-select {
           width:100%; padding:.42rem .6rem; border:1px solid var(--c-border,#dde1e7);
           border-radius:6px; font-size:.85rem; background:var(--c-surface,#fff);
           color:var(--c-text,#111); outline:none; transition:border-color .15s;
         }
-        .bulk-input:focus,.bulk-select:focus { border-color:var(--c-primary,#2563eb); }
+        .bulk-input:focus, .bulk-select:focus { border-color:var(--c-primary,#2563eb); }
         .bulk-select:disabled { background: #f1f5f9; cursor: not-allowed; color: #64748b; }
         
         .bulk-remove {
           display:flex; align-items:center; justify-content:center;
           width:28px; height:28px; border:none; border-radius:6px; cursor:pointer;
-          background:transparent; color:var(--c-danger,#dc2626); font-size:.9rem; transition:background .15s;
+          background:transparent; color:var(--c-danger,#dc2626); font-size:.9rem;
         }
         .bulk-remove:hover:not(:disabled) { background:#fee2e2; }
-        .bulk-remove:disabled { opacity:.3; cursor:default; }
         
-        .bulk-add-row {
-          display:inline-flex; align-items:center; gap:.3rem; font-size:.82rem;
-          color:var(--c-primary,#2563eb); background:none; border:none; cursor:pointer;
-          padding:.25rem 0; margin-bottom:.75rem; font-weight:600;
-        }
-        .bulk-add-row:hover { text-decoration:underline; }
-
         .checkbox-cell { display: flex; justify-content: center; }
-        .checkbox-cell input { width: 16px; height: 16px; cursor: pointer; }
       `}</style>
 
       <button className="btn-outline" onClick={() => setOpen(true)}>+ Add Student</button>
@@ -1179,7 +1227,9 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
               <button className="modal-close" onClick={close}>✕</button>
             </div>
 
-            <p className="bulk-hint">Add one or more students. Check "New" to automatically apply registration & caution fees.</p>
+            <p className="bulk-hint">
+              Enter details below. The <b>Enrolled Date</b> determines which installments (1-4) are billed for this year.
+            </p>
 
             <div className="bulk-table">
               <div className="bulk-header">
@@ -1188,6 +1238,7 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
                 <span>Guardian</span>
                 <span>Phone</span>
                 <span>Type</span>
+                <span>Enrolled Date</span>
                 <span style={{textAlign: "center"}}>New?</span>
                 <span></span>
               </div>
@@ -1197,17 +1248,14 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
                   {/* Name */}
                   <input className="bulk-input" value={d.name}
                     onChange={e => setField(i, "name", e.target.value)}
-                    placeholder="e.g. Amani Wanjiku" autoFocus={i === 0} />
+                    placeholder="Full name..." autoFocus={i === 0} />
 
                   {/* Class */}
                   <select className="bulk-select" value={d.stream}
                     onChange={e => {
                       const newStream = e.target.value as Stream;
                       setField(i, "stream", newStream);
-                      // Force Boarder if Class 7
-                      if (newStream === "Class 7") {
-                        setField(i, "type", "Boarder");
-                      }
+                      if (newStream === "Class 7") setField(i, "type", "Boarder");
                     }}>
                     {STREAMS.map(s => <option key={s} value={s}>{s}</option>)}
                   </select>
@@ -1215,7 +1263,7 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
                   {/* Guardian */}
                   <input className="bulk-input" value={d.guardian}
                     onChange={e => setField(i, "guardian", e.target.value)}
-                    placeholder="e.g. Jane Doe" />
+                    placeholder="Guardian name" />
 
                   {/* Phone */}
                   <input className="bulk-input" value={d.phone} type="tel"
@@ -1227,22 +1275,29 @@ function BulkAddStudentModal({ defaultStream, onAdd }: {
                     className="bulk-select" 
                     value={d.type}
                     disabled={d.stream === "Class 7"}
-                    title={d.stream === "Class 7" ? "Class 7 students must be Boarders" : ""}
                     onChange={e => setField(i, "type", e.target.value as StudentType)}>
                     <option value="Day">Day Scholar</option>
                     <option value="Transport">Transport</option>
                     <option value="Boarder">Boarder</option>
                   </select>
 
+                  {/* Enrollment Date (Calculates Pro-rata fees) */}
+                  <input 
+                    type="date" 
+                    className="bulk-input" 
+                    value={d.enrolledAt}
+                    onChange={e => setField(i, "enrolledAt", e.target.value)} 
+                  />
+
                   {/* Is New Toggle */}
-                  <div className="checkbox-cell" title="Applies Registration and Caution fees">
+                  <div className="checkbox-cell">
                     <input type="checkbox" checked={d.isNew} 
                       onChange={e => setField(i, "isNew", e.target.checked)} />
                   </div>
 
                   {/* Remove row */}
                   <button className="bulk-remove" onClick={() => removeRow(i)}
-                    disabled={drafts.length === 1} title="Remove row">✕</button>
+                    disabled={drafts.length === 1}>✕</button>
                 </div>
               ))}
             </div>

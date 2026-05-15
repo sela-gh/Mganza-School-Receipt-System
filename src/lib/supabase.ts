@@ -52,6 +52,7 @@ export interface DbStudent {
   notes:          string | null;
   created_at:     string;
   updated_at:     string;
+  enrolled_date?: string;
 }
 
 export interface DbStudentTermFee {
