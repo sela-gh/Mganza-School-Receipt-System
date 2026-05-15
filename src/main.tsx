@@ -5,6 +5,6 @@ import Dashboard from './dashboard'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <Dashboard />
+    <Dashboard/>
   </StrictMode>,
 )

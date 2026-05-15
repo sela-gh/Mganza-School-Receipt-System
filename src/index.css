@@ -891,6 +891,127 @@ h1, h2, h3, h4 { margin: 0; font-weight: 600; color: var(--color-text); }
   border-top: 1px solid var(--color-border);
 }
 
+/* ---------- Record Transaction Modal -------------------------------------- */
+.step-block { 
+  margin-bottom: 1.5rem; 
+}
+.step-label { 
+  font-weight: 600; 
+  margin-bottom: 0.75rem; 
+  display: flex; 
+  align-items: center; 
+  gap: 0.5rem; 
+}
+.step-num { 
+  display: inline-grid; 
+  place-items: center; 
+  width: 22px; 
+  height: 22px; 
+  border-radius: 50%; 
+  background: var(--color-primary); 
+  color: white; 
+  font-size: 0.75rem; 
+}
+.step-label-hint { 
+  font-size: 0.8rem; 
+  color: var(--color-text-muted); 
+  font-weight: 400; 
+  margin-left: auto; 
+}
+
+/* Class/Stream Picker */
+.stream-picker { 
+  display: flex; 
+  flex-wrap: wrap; 
+  gap: 0.5rem; 
+}
+.stream-chip { 
+  padding: 0.4rem 0.8rem; 
+  border-radius: 999px; 
+  border: 1px solid var(--color-border); 
+  background: var(--color-surface); 
+  font-size: 0.85rem; 
+  display: flex; 
+  gap: 0.4rem; 
+  align-items: center; 
+  transition: all var(--transition); 
+}
+.stream-chip:hover { 
+  border-color: var(--color-primary); 
+}
+.stream-chip--active { 
+  background: var(--color-primary-soft); 
+  color: var(--color-primary); 
+  border-color: var(--color-primary); 
+}
+.chip-count { 
+  background: var(--color-border); 
+  padding: 0.1rem 0.4rem; 
+  border-radius: 999px; 
+  font-size: 0.7rem; 
+  color: var(--color-text-muted); 
+}
+
+/* Student Search & List */
+.student-search { 
+  width: 100%; 
+  padding: 0.6rem 0.75rem; 
+  border: 1px solid var(--color-border); 
+  border-radius: var(--radius-md); 
+  margin-bottom: 0.5rem; 
+  background: var(--color-surface);
+  transition: border-color var(--transition);
+}
+.student-search:focus { 
+  border-color: var(--color-primary); 
+  box-shadow: 0 0 0 3px var(--color-focus-ring); 
+}
+
+.student-list { 
+  max-height: 220px; 
+  overflow-y: auto; 
+  border: 1px solid var(--color-border); 
+  border-radius: var(--radius-md); 
+  display: flex; 
+  flex-direction: column; 
+  background: var(--color-surface);
+}
+.student-list-empty { 
+  padding: 1.5rem 1rem; 
+  text-align: center; 
+  color: var(--color-text-muted); 
+  font-size: 0.85rem; 
+}
+.student-row { 
+  display: flex; 
+  justify-content: space-between; 
+  align-items: center; 
+  padding: 0.7rem 0.85rem; 
+  border-bottom: 1px solid var(--color-border); 
+  font-size: 0.85rem; 
+  background: transparent; 
+  transition: background var(--transition); 
+}
+.student-row:last-child { 
+  border-bottom: none; 
+}
+.student-row:hover { 
+  background: var(--color-surface-alt); 
+}
+.student-row--active { 
+  background: var(--color-primary-soft); 
+}
+.student-row--active .student-row-name {
+  color: var(--color-primary);
+}
+.student-row-name { 
+  font-weight: 500; 
+}
+.student-row-meta { 
+  font-size: 0.75rem; 
+  color: var(--color-text-muted); 
+}
+
 /* ---------- Animations ---------------------------------------------------- */
 @keyframes fade-in {
   from { opacity: 0; }

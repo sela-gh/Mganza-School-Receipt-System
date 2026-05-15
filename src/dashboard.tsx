@@ -106,72 +106,59 @@ type UnallocatedRow = {
 const fmt = (n: number) =>
   new Intl.NumberFormat("en-TZ", { style: "currency", currency: "TZS", maximumFractionDigits: 0 }).format(n);
 
+// Fee calculation — all amounts are YEARLY totals.
+// Tuition applies to Class 4 & 7 (paid once in July, included in yearly total here).
+// Registration is a one-off for brand-new students only.
 function calculateExpectedFees(
-  stream: Stream, 
-  type: StudentType, 
-  isNew: boolean, 
+  stream: Stream,
+  type: StudentType,
+  isNew: boolean,
   globalFees: GlobalFees,
-  termNumber: number // NEW: We now pass the term number to apply rules
 ): number {
   let total = 0;
 
-  // 1. Base Installment Fees (Charged every term)
-  if (type === "Boarder") total += globalFees.boarderBase;
+  // 1. Annual school fees based on student type
+  if (type === "Boarder")        total += globalFees.boarderBase;
   else if (type === "Transport") total += globalFees.transportBase;
-  else total += globalFees.dayBase;
+  else                           total += globalFees.dayBase;
 
-  // 2. Annual Mandatory Fees (Charged once in Term 1)
-  if (termNumber === 1) {
-    total += globalFees.library;
-    total += globalFees.caution; 
+  // 2. Annual mandatory add-ons (library, caution — charged once a year)
+  total += globalFees.library;
+  total += globalFees.caution;
+
+  // 3. Tuition (July — Class 7 always boarder rate; Class 4 depends on type)
+  if (stream === "Class 7") {
+    total += globalFees.tuitionBoarder;
+  } else if (stream === "Class 4") {
+    total += (type === "Boarder") ? globalFees.tuitionBoarder : globalFees.tuitionDay;
   }
 
-  // 3. Tuition Fees (Class 4 & 7, charged in Term 2)
-  if (termNumber === 2) {
-    if (stream === "Class 7") {
-      total += globalFees.tuitionBoarder;
-    } else if (stream === "Class 4") {
-      total += (type === "Boarder") ? globalFees.tuitionBoarder : globalFees.tuitionDay;
-    }
-  }
-
-  // 4. Registration (New students only)
-  if (isNew) {
-    total += globalFees.registration;
-  }
+  // 4. One-off registration fee for new students
+  if (isNew) total += globalFees.registration;
 
   return total;
 }
 
-// ─── Term helpers (Updated for 4 Terms) ─────────────────────────────────────────
-type TermLabel = { number: 1 | 2 | 3 | 4; year: number; label: string; start: string; end: string };
+// ─── Academic year helper ────────────────────────────────────────────────────
+// Fees are annual — no per-term splitting. We only need the year label.
+type TermLabel = { number: 1; year: number; label: string; start: string; end: string };
 
 function getCurrentTerm(): TermLabel {
-  const now   = new Date();
-  const month = now.getMonth() + 1;
-  const year  = now.getFullYear();
-  
-  // 4 terms (installments) across the year
-  if (month >= 1 && month <= 3)
-    return { number: 1, year, label: `Term 1 · ${year}`, start: `${year}-01-01`, end: `${year}-03-31` };
-  if (month >= 4 && month <= 6)
-    return { number: 2, year, label: `Term 2 · ${year}`, start: `${year}-04-01`, end: `${year}-06-30` };
-  if (month >= 7 && month <= 9)
-    return { number: 3, year, label: `Term 3 · ${year}`, start: `${year}-07-01`, end: `${year}-09-30` };
-  
-  return { number: 4, year, label: `Term 4 · ${year}`, start: `${year}-10-01`, end: `${year}-12-31` };
+  const year = new Date().getFullYear();
+  return { number: 1, year, label: `Academic Year ${year}`, start: `${year}-01-01`, end: `${year}-12-31` };
 }
 
 const CURRENT_TERM = getCurrentTerm();
 
 // Map a StudentRow → Student UI type
-const studentFromRow = (r: StudentRow, globalFees: GlobalFees, currentTerm: TermLabel): Student => {
+const studentFromRow = (r: StudentRow, globalFees: GlobalFees): Student => {
   const classesObj = Array.isArray(r.classes) ? r.classes[0] : r.classes;
   const stream     = (classesObj?.name ?? "") as Stream;
   const type       = r.student_type ?? "Day";
   const stfFee     = r.student_term_fees?.[0]?.expected_fee;
-  
-  const baseline   = calculateExpectedFees(stream, type, false, globalFees, currentTerm.number);
+
+  // Yearly baseline — no term number needed
+  const baseline     = calculateExpectedFees(stream, type, false, globalFees);
   const expectedFees = stfFee != null ? stfFee : baseline;
 
   return {
@@ -182,11 +169,11 @@ const studentFromRow = (r: StudentRow, globalFees: GlobalFees, currentTerm: Term
     phone:         r.parent_phone ?? undefined,
     type,
     expectedFees,
-    walletBalance: Number(r.wallet_balance || 0), // NEW
+    walletBalance: Number(r.wallet_balance || 0),
   };
 };
 
-const txFromRow        = (r: TransactionRow): Transaction => ({
+const txFromRow = (r: TransactionRow): Transaction => ({
   id: r.id, date: r.payment_date, studentId: r.student_id, amount: r.amount,
   method: r.method, reference: r.reference ?? undefined,
   receivedBy: r.received_by, notes: r.notes ?? undefined,
@@ -200,11 +187,11 @@ const unallocFromRow   = (r: UnallocatedRow): Unallocated => ({
 type Page = "overview" | "transactions" | "unallocated" | "uniforms" | { type: "class"; stream: Stream };
 
 const DEFAULT_GLOBAL_FEES: GlobalFees = {
-  dayBase: 200000,
-  transportBase: 250000,
-  boarderBase: 325000,
-  tuitionBoarder: 130000,
-  tuitionDay: 60000,
+  dayBase:        800000,   // per year — PP1 to Class 6, no transport
+  transportBase: 1000000,   // per year — PP1 to Class 6, with school bus
+  boarderBase:   1300000,   // per year — all boarders (Class 7 required)
+  tuitionBoarder:  130000,  // July tuition — Class 7 boarders & Class 4 boarders
+  tuitionDay:       60000,  // July tuition — Class 4 day scholars
   library: 0,
   caution: 0,
   registration: 0,
@@ -236,8 +223,7 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
       try {
         const { data: termData } = await supabase
           .from("terms")
-          .select("id, term_number, year")
-          .eq("term_number", CURRENT_TERM.number)
+          .select("id")
           .eq("year", CURRENT_TERM.year)
           .maybeSingle();
         const termId: string | null = (termData as { id: string } | null)?.id ?? null;
@@ -290,7 +276,7 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
         }));
         
         // Pass the activeFees we just fetched
-        setStudents(filteredStudents.map(s => studentFromRow(s as StudentRow, activeFees, CURRENT_TERM)));
+        setStudents(filteredStudents.map(s => studentFromRow(s as StudentRow, activeFees)));
         setTransactions((txsRes.data ?? []).map(r => txFromRow(r as TransactionRow)));
         setUnallocated((unallocRes.data ?? []).map(r => unallocFromRow(r as UnallocatedRow)));
       } catch (err) {
@@ -349,10 +335,10 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
     const { data, error } = await supabase
       .from("students")
       .insert(insertRows)
-      .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)");
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, classes(name), student_term_fees(expected_fee, term_id)");
     if (error) { toast.error(error.message); return; }
 
-    const added = (data ?? []).map(r => studentFromRow(r as unknown as StudentRow, globalFees, CURRENT_TERM));
+    const added = (data ?? []).map(r => studentFromRow(r as unknown as StudentRow, globalFees));
     setStudents(p => [...p, ...added]);
     toast.success(added.length === 1 ? `${added[0].name} enrolled` : `${added.length} students enrolled`);
   };
@@ -376,7 +362,7 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
       .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
-    setStudents(p => p.map(x => x.id === s.id ? studentFromRow(data as unknown as StudentRow, globalFees, CURRENT_TERM) : x));
+    setStudents(p => p.map(x => x.id === s.id ? studentFromRow(data as unknown as StudentRow, globalFees) : x));
     toast.success("Student updated");
   };
 
@@ -399,77 +385,85 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
       .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
-    setStudents(p => p.map(s => s.id === id ? studentFromRow(data as unknown as StudentRow, globalFees, CURRENT_TERM) : s));
+    setStudents(p => p.map(s => s.id === id ? studentFromRow(data as unknown as StudentRow, globalFees) : s));
     toast.success("Student moved to " + to);
   };
 
 const updateGlobalFees = async (newFees: GlobalFees) => {
     setGlobalFees(newFees);
     setStudents(p => p.map(s => {
-      // FIX: Passing the actual term number instead of a true/false check
-      const baseline = calculateExpectedFees(s.stream, s.type, false, newFees, CURRENT_TERM.number);
+      const baseline = calculateExpectedFees(s.stream, s.type, false, newFees);
       return { ...s, expectedFees: baseline };
     }));
     toast.success("Global fees updated!");
   };
   const recordTx = async (t: Omit<Transaction, "id">) => {
+    if (!t.studentId) { toast.error("No student selected"); return; }
     const student = studentLookup[t.studentId];
-    
-    // Calculate what is strictly owed for THIS term
-    const currentPaid = transactions.filter(tx => tx.studentId === student.id).reduce((a, x) => a + x.amount, 0);
-    const balanceOwed = student.expectedFees - currentPaid - student.walletBalance;
+    if (!student) { toast.error("Student not found"); return; }
 
-    // 1. Insert the ACTUAL payment (Parent gets receipt for the full amount)
+    // 1. Insert the real payment — term_id is auto-filled by DB trigger
     const { data, error } = await supabase
       .from("transactions")
-      .insert({ payment_date: t.date, student_id: t.studentId, amount: t.amount, method: t.method, reference: t.reference ?? null, received_by: t.receivedBy, notes: t.notes ?? null })
+      .insert({
+        payment_date: t.date,
+        student_id:   t.studentId,
+        amount:       t.amount,
+        method:       t.method,
+        reference:    t.reference ?? null,
+        received_by:  t.receivedBy,
+        notes:        t.notes ?? null,
+      })
       .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
       .single();
 
     if (error) { toast.error(error.message); return; }
     const tx = txFromRow(data as TransactionRow);
-    
-    // We will store our new transactions here to update state safely
     const newTransactionsToAdd: Transaction[] = [tx];
 
-    // 2. The Magic Wallet logic: Move excess to wallet
-    if (t.amount > balanceOwed) {
-      // If balanceOwed was already negative, the entire payment is excess
-      const excess = balanceOwed < 0 ? t.amount : t.amount - balanceOwed;
+    // 2. Wallet logic — move any excess above what is owed into the wallet
+    const currentPaid = transactions
+      .filter(x => x.studentId === student.id && x.amount > 0)
+      .reduce((a, x) => a + x.amount, 0);
+    const balanceOwed = Math.max(0, student.expectedFees - currentPaid - student.walletBalance);
 
-      // Update Database Wallet
+    if (t.amount > balanceOwed && balanceOwed >= 0) {
+      const excess = t.amount - balanceOwed;
+      const newWallet = student.walletBalance + excess;
+
+      // Update wallet in DB
       await supabase
         .from("students")
-        .update({ wallet_balance: student.walletBalance + excess })
+        .update({ wallet_balance: newWallet })
         .eq("id", student.id);
 
-      // Update Local State Wallet
-      setStudents(p => p.map(s => s.id === student.id ? { ...s, walletBalance: s.walletBalance + excess } : s));
+      // Update wallet in local state
+      setStudents(p => p.map(s =>
+        s.id === student.id ? { ...s, walletBalance: newWallet } : s
+      ));
 
-      // 3. Insert a hidden system offset so the term doesn't visually double-count
+      // Insert a system offset row so collected totals stay accurate
       const { data: offsetData } = await supabase
         .from("transactions")
         .insert({
           payment_date: t.date,
-          student_id: student.id,
-          amount: -excess,
-          method: t.method,
-          received_by: "System",
-          notes: `Auto-transfer excess to Wallet (Ref: ${tx.id})`
+          student_id:   student.id,
+          amount:       -excess,
+          method:       t.method,
+          received_by:  "System",
+          notes:        `Wallet credit (Ref: ${tx.id})`,
         })
         .select("id, payment_date, student_id, amount, method, reference, received_by, notes")
         .single();
 
       if (offsetData) {
-        newTransactionsToAdd.unshift(txFromRow(offsetData as TransactionRow)); // Add offset to the front
+        newTransactionsToAdd.unshift(txFromRow(offsetData as TransactionRow));
       }
     }
 
-    // Safely update React state using the previous state to avoid race conditions
     setTransactions(prev => [...newTransactionsToAdd, ...prev]);
-    
-    setReceiptTx(tx); // Only show receipt for the REAL payment
-    toast.success("Payment recorded & Wallet updated if overpaid");
+    setReceiptTx(tx);
+    toast.success("Payment recorded");
   };
 
   const addUnallocated = async (u: Omit<Unallocated, "id">) => {
@@ -538,7 +532,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
           <NavItem icon="↔" label="Transactions" active={page === "transactions"} badge={transactions.length} onClick={() => { setPage("transactions"); setSidebarOpen(false); }} />
           <NavItem icon="◎" label="Unallocated" active={page === "unallocated"} badge={unallocated.length > 0 ? unallocated.length : undefined} badgeAlert onClick={() => { setPage("unallocated"); setSidebarOpen(false); }} />
           <NavItem 
-  icon="👕" 
+  icon="" 
   label="Uniform Sales" 
   active={page === "uniforms"} 
   onClick={() => { setPage("uniforms"); setSidebarOpen(false); }} 
@@ -603,7 +597,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
                         <span className="class-name">{row.stream}</span>
                         <span className="class-count">{row.count} pupils</span>
                       </div>
-                     <div className="class-fee-label">Day {fmt(globalFees.dayBase)} · Transport {fmt(globalFees.transportBase)} · Boarder {fmt(globalFees.boarderBase)}</div>
+                     <div className="class-fee-label">Day {fmt(globalFees.dayBase)} · Transport {fmt(globalFees.transportBase)} · Boarder {fmt(globalFees.boarderBase)} <span style={{fontSize:"0.7rem",opacity:.7}}>/yr</span></div>
                       <div className="progress-bar">
                         <div className="progress-fill" style={{ width: `${pct}%` }} />
                       </div>
@@ -639,7 +633,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
             return (
               <div className="fade-in">
                 <div className="stat-grid">
-                 <StatCard label="Enrolled"    value={String(stats.count)} hint={`Day ${fmt(globalFees.dayBase)} · Boarder ${fmt(globalFees.boarderBase)}`} />
+                 <StatCard label="Enrolled"    value={String(stats.count)} hint={`Day ${fmt(globalFees.dayBase)} · Boarder ${fmt(globalFees.boarderBase)} /yr`} />
                   <StatCard label="Expected"    value={fmt(stats.expected)} />
                   <StatCard label="Collected"   value={fmt(stats.collected)} accent="success" hint={`${Math.round((stats.collected / (stats.expected || 1)) * 100)}%`} />
                   <StatCard label="Outstanding" value={fmt(stats.debt)} accent="danger" />
@@ -989,7 +983,9 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
     const amt = Number(amount);
     if (!studentId)       { toast.error("Select a student"); return; }
     if (!amt || amt <= 0) { toast.error("Enter a valid amount"); return; }
-    onRecord({ date, studentId, amount: amt, method, reference: reference || undefined, receivedBy, notes: notes || undefined });
+    onRecord({
+      date, studentId, amount: amt, method, reference: reference || undefined, receivedBy, notes: notes || undefined,
+    });
     close();
   };
 
@@ -1035,7 +1031,7 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
                       onClick={() => setStudentId(s.id)}>
                       <span className="student-row-name">{s.name}</span>
                       <span className="student-row-meta">
-                       s.type === 'Boarder' ? "🛏️ Boarder" : s.type === 'Transport' ? "🚌 Transport" : "🚶 Day"
+                       {s.type === 'Boarder' ? "🛏️ Boarder" : s.type === 'Transport' ? "🚌 Transport" : "🚶 Day"}
                       </span>
                     </button>
                   ))}
@@ -1311,13 +1307,13 @@ function EditFeesModal({
 
             <div className="scrollable-content" style={{ maxHeight: "65vh", overflowY: "auto", paddingRight: "10px" }}>
               
-              <h4 style={{ margin: "1rem 0 .5rem" }}>School Fees (Per Term / Installment)</h4>
+              <h4 style={{ margin: "1rem 0 .5rem" }}>School Fees (Annual — full year)</h4>
               <div className="form-grid">
-                <div className="form-field"><label>Day Scholar (No Transport)</label>
+                <div className="form-field"><label>Day Scholar — No Transport (TZS / year)</label>
                   <input type="number" value={draft.dayBase} onChange={e => updateDraft("dayBase", Number(e.target.value))} /></div>
-                <div className="form-field"><label>Day Scholar (With Transport)</label>
+                <div className="form-field"><label>Day Scholar — With Transport (TZS / year)</label>
                   <input type="number" value={draft.transportBase} onChange={e => updateDraft("transportBase", Number(e.target.value))} /></div>
-                <div className="form-field"><label>Boarding Fees</label>
+                <div className="form-field"><label>Boarding Fees (TZS / year)</label>
                   <input type="number" value={draft.boarderBase} onChange={e => updateDraft("boarderBase", Number(e.target.value))} /></div>
               </div>
 
@@ -1591,7 +1587,7 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
           <hr />
           <table><tbody>
             <tr><td>Amount Paid</td><td><span className="amount">{fmt(tx.amount)}</span></td></tr>
-            {student && <tr><td>Term Fee</td><td>{fmt(student.expectedFees)}</td></tr>}
+            {student && <tr><td>Annual Fees</td><td>{fmt(student.expectedFees)}</td></tr>}
           </tbody></table>
           <p className="footer">Official receipt — retain for your records.<br />Madam Paradise School · {CURRENT_TERM.label}</p>
         </div>
@@ -1678,7 +1674,7 @@ function UniformsPage({ globalFees, students, onRecord }: {
       method,
       reference: reference || undefined,
       receivedBy: "Bursar",
-      notes: `Uniform Sale: ${itemNames}`
+      notes: `Uniform Sale: ${itemNames}`,
     });
 
     toast.success("Uniform sale recorded!");
