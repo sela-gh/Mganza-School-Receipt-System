@@ -511,7 +511,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
         <button className="burger" onClick={() => setSidebarOpen(o => !o)} aria-label="Menu">
           <span /><span /><span />
         </button>
-        <span className="mobile-title">Madam Paradise</span>
+        <span className="mobile-title">Paradise Schools</span>
         <RecordTxBtn students={students} onRecord={recordTx} />
       </div>
 
@@ -522,7 +522,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
         <div className="sidebar-brand">
           <div className="brand-icon">MP</div>
           <div>
-            <div className="brand-name">Madam Paradise</div>
+            <div className="brand-name">Paradise Schools</div>
             <div className="brand-sub">Fees Management</div>
           </div>
         </div>
@@ -1570,7 +1570,8 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
           <button className="modal-close" onClick={onClose}>✕</button>
         </div>
         <div ref={ref} className="receipt-body">
-          <h1>Madam Paradise School</h1>
+          <h1>Paradise Schools</h1>
+          <h3>P.O BOX 94 Chato</h3>
           <p className="sub">Official Fee Receipt</p>
           <table><tbody>
             <tr><td>Receipt No.</td><td><span className="mono-cell">{tx.id.toUpperCase()}</span></td></tr>
@@ -1589,7 +1590,7 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
             <tr><td>Amount Paid</td><td><span className="amount">{fmt(tx.amount)}</span></td></tr>
             {student && <tr><td>Annual Fees</td><td>{fmt(student.expectedFees)}</td></tr>}
           </tbody></table>
-          <p className="footer">Official receipt — retain for your records.<br />Madam Paradise School · {CURRENT_TERM.label}</p>
+          <p className="footer">Official receipt — retain for your records.<br />Paradise Schols · {CURRENT_TERM.label}</p>
         </div>
         <div className="form-actions">
           <button className="btn-ghost" onClick={onClose}>Close</button>
