@@ -384,6 +384,7 @@ const { data: classRows, error: classErr } = await supabase
         guardian:       s.guardian ?? null,
         parent_phone:   s.phone ?? null,
         student_type:   s.type,
+        enrolled_date:  s.enrolledAt, // <--- THIS IS THE MISSING PIECE!
       };
     });
 
