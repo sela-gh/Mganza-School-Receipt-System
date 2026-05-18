@@ -80,6 +80,8 @@ type StudentRow = {
   classes:           { name: string } | { name: string }[] | null;
   student_term_fees: Array<{ expected_fee: number; term_id?: string }> | null;
   wallet_balance: number;
+  enrolled_date?:    string; // <--- ADDED
+  classNameOverride?: string; // <--- ADDED
 };
 
 type TransactionRow = {
@@ -185,15 +187,19 @@ function getCurrentTerm(): TermLabel {
 const CURRENT_TERM = getCurrentTerm();
 
 // Map a StudentRow → Student UI type
-const studentFromRow = (r: StudentRow & { enrolled_date?: string }, globalFees: GlobalFees): Student => {
+// Map a StudentRow → Student UI type
+const studentFromRow = (r: StudentRow, globalFees: GlobalFees, classMap?: Record<string, string>): Student => {
   const classesObj = Array.isArray(r.classes) ? r.classes[0] : r.classes;
-  const stream     = (classesObj?.name ?? "") as Stream;
+  
+  // THE FIX: Fallback chain -> 1. Override, 2. Joined Object, 3. ClassMap lookup, 4. Empty string
+  const stream = (r.classNameOverride || classesObj?.name || (classMap && classMap[r.class_id]) || "") as Stream;
+  
   const type       = r.student_type ?? "Day";
   const stfFee     = r.student_term_fees?.[0]?.expected_fee;
- const currentYear = new Date().getFullYear();
-const enrollmentDate = r.enrolled_date ?? `${currentYear}-01-01`;
+  const currentYear = new Date().getFullYear();
+  const enrollmentDate = r.enrolled_date ?? `${currentYear}-01-01`;
 
-  // Yearly baseline — no term number needed
+  // Yearly baseline
   const baseline     = calculateExpectedFees(stream, type, false, globalFees, enrollmentDate);
   const expectedFees = stfFee != null ? stfFee : baseline;
 
@@ -206,9 +212,7 @@ const enrollmentDate = r.enrolled_date ?? `${currentYear}-01-01`;
     type,
     expectedFees,
     walletBalance: Number(r.wallet_balance || 0),
-    enrolledAt:    enrollmentDate, // <--- ADD THIS LINE
-    
-    
+    enrolledAt:    enrollmentDate,
   };
 };
 
@@ -297,11 +301,16 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
             .order("deposit_date", { ascending: false }),
         ]);
 
-        if (cancelled) return;
+if (cancelled) return;
         if (classesRes.error)  throw classesRes.error;
         if (studentsRes.error) throw studentsRes.error;
         if (txsRes.error)      throw txsRes.error;
         if (unallocRes.error)  throw unallocRes.error;
+
+        // BUILD THE CLASSMAP FOR FALLBACKS: { "uuid-123": "Class 2" }
+        const classMapData = Object.fromEntries(
+          (classesRes.data ?? []).map(c => [c.id, c.name])
+        );
 
         const rawStudents = (studentsRes.data ?? []) as Array<StudentRow & {
           student_term_fees: Array<{ expected_fee: number; term_id?: string }> | null;
@@ -314,8 +323,8 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
             : (s.student_term_fees ?? []),
         }));
         
-        // Pass the activeFees we just fetched
-        setStudents(filteredStudents.map(s => studentFromRow(s as StudentRow, activeFees)));
+        // PASS classMapData AS THE 3RD ARGUMENT
+        setStudents(filteredStudents.map(s => studentFromRow(s as StudentRow, activeFees, classMapData)));
         setTransactions((txsRes.data ?? []).map(r => txFromRow(r as TransactionRow)));
         setUnallocated((unallocRes.data ?? []).map(r => unallocFromRow(r as UnallocatedRow)));
       } catch (err) {
@@ -350,18 +359,25 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
   ) => {
     if (newStudents.length === 0) return;
 
-    const streamSet = [...new Set(newStudents.map(s => s.stream))];
-    const { data: classRows, error: classErr } = await supabase
-      .from("classes").select("id, name").in("name", streamSet);
+// 1. Fetch ALL classes without filtering so we can inspect them in JS
+const { data: classRows, error: classErr } = await supabase
+      .from("classes").select("id, name");
+      
     if (classErr) { toast.error(classErr.message); return; }
 
-    const classMap = Object.fromEntries(
-      (classRows ?? []).map((r: { id: string; name: string }) => [r.name, r])
-    );
-
     const insertRows = newStudents.map(s => {
-      const cls = classMap[s.stream];
-      if (!cls) throw new Error(`Class "${s.stream}" not found`);
+      // Strip all spaces and lowercase both sides (e.g., "Class 2" becomes "class2")
+      const cleanTarget = s.stream.replace(/\s+/g, '').toLowerCase();
+      
+      const cls = (classRows ?? []).find(r => 
+        r.name.replace(/\s+/g, '').toLowerCase() === cleanTarget
+      );
+
+      // Ultimate debug error
+      if (!cls) {
+        const dbNames = (classRows ?? []).map(r => `"${r.name}"`).join(', ');
+        throw new Error(`Match failed for "${s.stream}". Database currently sees: ${dbNames}`);
+      }
       return {
         full_name:      s.name,
         class_id:       cls.id,
@@ -377,7 +393,17 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
       .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, classes(name), student_term_fees(expected_fee, term_id)");
     if (error) { toast.error(error.message); return; }
 
-    const added = (data ?? []).map(r => studentFromRow(r as unknown as StudentRow, globalFees));
+    const added = (data ?? []).map(r => {
+      // Find the stream name we originally tried to insert
+      const originalStudent = newStudents.find(s => s.name === r.full_name);
+      
+      // Inject it as the classNameOverride
+      return studentFromRow(
+        { ...r, classNameOverride: originalStudent?.stream } as unknown as StudentRow, 
+        globalFees
+      );
+    });
+    
     setStudents(p => [...p, ...added]);
     toast.success(added.length === 1 ? `${added[0].name} enrolled` : `${added.length} students enrolled`);
   };
@@ -401,8 +427,7 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
       .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
-    setStudents(p => p.map(x => x.id === s.id ? studentFromRow(data as unknown as StudentRow, globalFees) : x));
-    toast.success("Student updated");
+   setStudents(p => p.map(x => x.id === s.id ? studentFromRow({ ...data, classNameOverride: s.stream } as unknown as StudentRow, globalFees) : x));
   };
 
   const removeStudent = async (id: string) => {
@@ -424,7 +449,7 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
       .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
-    setStudents(p => p.map(s => s.id === id ? studentFromRow(data as unknown as StudentRow, globalFees) : s));
+    setStudents(p => p.map(s => s.id === id ? studentFromRow({ ...data, classNameOverride: to } as unknown as StudentRow, globalFees) : s));
     toast.success("Student moved to " + to);
   };
 
