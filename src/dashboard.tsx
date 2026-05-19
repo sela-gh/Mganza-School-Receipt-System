@@ -1199,7 +1199,7 @@ type StudentDraft = {
 
 function BulkAddStudentModal({ defaultStream, onAdd }: {
   defaultStream?: Stream;
-  onAdd: (students: Array<Omit<Student, "id" | "expectedFees" | "walletBalance"> & { isNew: boolean, enrolledAt: string }>) => void;
+  onAdd: (students: Array<Omit<Student, "id" | "expectedFees" | "walletBalance" | "previousArrears" | "totalOwed"> & { isNew: boolean, enrolledAt: string }>) => void;
 }) {
   // Change default from 'today' to January 1st
   const currentYear = new Date().getFullYear();
