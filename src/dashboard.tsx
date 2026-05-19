@@ -35,15 +35,17 @@ type GlobalFees = {
 };
 
 type Student = {
-  id:            string;
-  name:          string;
-  stream:        Stream;
-  guardian?:     string;
-  phone?:        string;      // NEW
-  type:          StudentType; // NEW
-  expectedFees:  number;
-  walletBalance: number;
-  enrolledAt:    string;
+  id:              string;
+  name:            string;
+  stream:          Stream;
+  guardian?:       string;
+  phone?:          string;
+  type:            StudentType;
+  expectedFees:    number;   // this year's fees (pro-rata)
+  previousArrears: number;   // carried-over debt from last year
+  totalOwed:       number;   // expectedFees + previousArrears
+  walletBalance:   number;
+  enrolledAt:      string;
 };
 
 type PaymentMethod = "Bank Transfer" | "Cash";
@@ -71,17 +73,18 @@ type Unallocated = {
 
 // ─── DB row types ──────────────────────────────────────────────────────────────
 type StudentRow = {
-  id:                string;
-  full_name:         string;
-  class_id:          string;
-  guardian:          string | null;
-  parent_phone:      string | null;  // NEW
-  student_type:      StudentType;    // NEW
-  classes:           { name: string } | { name: string }[] | null;
-  student_term_fees: Array<{ expected_fee: number; term_id?: string }> | null;
-  wallet_balance: number;
-  enrolled_date?:    string; // <--- ADDED
-  classNameOverride?: string; // <--- ADDED
+  id:                 string;
+  full_name:          string;
+  class_id:           string;
+  guardian:           string | null;
+  parent_phone:       string | null;
+  student_type:       StudentType;
+  classes:            { name: string } | { name: string }[] | null;
+  student_term_fees:  Array<{ expected_fee: number; term_id?: string }> | null;
+  wallet_balance:     number;
+  previous_arrears:   number;   // carried-over debt from previous year
+  enrolled_date?:     string;
+  classNameOverride?: string;
 };
 
 type TransactionRow = {
@@ -199,20 +202,24 @@ const studentFromRow = (r: StudentRow, globalFees: GlobalFees, classMap?: Record
   const currentYear = new Date().getFullYear();
   const enrollmentDate = r.enrolled_date ?? `${currentYear}-01-01`;
 
-  // Yearly baseline
-  const baseline     = calculateExpectedFees(stream, type, false, globalFees, enrollmentDate);
-  const expectedFees = stfFee != null ? stfFee : baseline;
+  // Yearly baseline (this year's fees, pro-rated by enrollment date)
+  const baseline       = calculateExpectedFees(stream, type, false, globalFees, enrollmentDate);
+  const expectedFees   = stfFee != null ? stfFee : baseline;
+  const previousArrears = Number(r.previous_arrears || 0);
+  const totalOwed      = expectedFees + previousArrears;
 
   return {
-    id:            r.id,
-    name:          r.full_name,
+    id:              r.id,
+    name:            r.full_name,
     stream,
-    guardian:      r.guardian ?? undefined,
-    phone:         r.parent_phone ?? undefined,
+    guardian:        r.guardian ?? undefined,
+    phone:           r.parent_phone ?? undefined,
     type,
     expectedFees,
-    walletBalance: Number(r.wallet_balance || 0),
-    enrolledAt:    enrollmentDate,
+    previousArrears,
+    totalOwed,
+    walletBalance:   Number(r.wallet_balance || 0),
+    enrolledAt:      enrollmentDate,
   };
 };
 
@@ -286,7 +293,7 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
           supabase.from("classes").select("id, name").order("sort_order"),
           supabase
             .from("students")
-            .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, enrolled_date, classes(name), student_term_fees(expected_fee, term_id)")
+            .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, previous_arrears, enrolled_date, classes(name), student_term_fees(expected_fee, term_id)")
             .eq("is_active", true)
             .order("full_name"),
           supabase
@@ -340,14 +347,16 @@ if (cancelled) return;
   const studentLookup = useMemo(() => Object.fromEntries(students.map(s => [s.id, s])), [students]);
 
   const totals = useMemo(() => {
-    const expected  = students.reduce((a, s) => a + s.expectedFees, 0);
+    // totalOwed = this year fees + previous arrears
+    const expected  = students.reduce((a, s) => a + s.totalOwed, 0);
     const collected = transactions.reduce((a, t) => a + t.amount, 0);
     return { expected, collected, debt: Math.max(0, expected - collected), unallocatedAmt: unallocated.reduce((a, u) => a + u.amount, 0) };
   }, [students, transactions, unallocated]);
 
  const streamStats = useMemo(() => STREAMS.map(stream => {
     const ss  = students.filter(s => s.stream === stream);
-    const exp = ss.reduce((a, s) => a + s.expectedFees, 0);
+    // expected includes this year's fees + any carried-over arrears
+    const exp = ss.reduce((a, s) => a + s.totalOwed, 0);
     const col = transactions.filter(t => ss.some(s => s.id === t.studentId)).reduce((a, t) => a + t.amount, 0);
     return { stream, count: ss.length, expected: exp, collected: col, debt: Math.max(0, exp - col) };
   }), [students, transactions]);
@@ -391,7 +400,7 @@ const { data: classRows, error: classErr } = await supabase
     const { data, error } = await supabase
       .from("students")
       .insert(insertRows)
-      .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, classes(name), student_term_fees(expected_fee, term_id)");
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, previous_arrears, classes(name), student_term_fees(expected_fee, term_id)");
     if (error) { toast.error(error.message); return; }
 
     const added = (data ?? []).map(r => {
@@ -425,7 +434,7 @@ const { data: classRows, error: classErr } = await supabase
         student_type: s.type 
       })
       .eq("id", s.id)
-      .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, previous_arrears, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
    setStudents(p => p.map(x => x.id === s.id ? studentFromRow({ ...data, classNameOverride: s.stream } as unknown as StudentRow, globalFees) : x));
@@ -447,7 +456,7 @@ const { data: classRows, error: classErr } = await supabase
       .from("students")
       .update({ class_id: classRow.id })
       .eq("id", id)
-      .select("id, full_name, class_id, guardian, parent_phone, student_type, classes(name), student_term_fees(expected_fee, term_id)")
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, previous_arrears, classes(name), student_term_fees(expected_fee, term_id)")
       .single();
     if (error) { toast.error(error.message); return; }
     setStudents(p => p.map(s => s.id === id ? studentFromRow({ ...data, classNameOverride: to } as unknown as StudentRow, globalFees) : s));
@@ -486,28 +495,54 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
     const tx = txFromRow(data as TransactionRow);
     const newTransactionsToAdd: Transaction[] = [tx];
 
-    // 2. Wallet logic — move any excess above what is owed into the wallet
+    // 2. Payment allocation logic:
+    //    Money is applied in this order:
+    //      a) Previous arrears (carried-over debt) — must reach zero first
+    //      b) This year's fees
+    //      c) Any excess → wallet credit
     const currentPaid = transactions
       .filter(x => x.studentId === student.id && x.amount > 0)
       .reduce((a, x) => a + x.amount, 0);
-    const balanceOwed = Math.max(0, student.expectedFees - currentPaid - student.walletBalance);
 
-    if (t.amount > balanceOwed && balanceOwed >= 0) {
-      const excess = t.amount - balanceOwed;
+    // Total still owed = arrears + this year's fees − already paid − wallet credit
+    const totalStillOwed = Math.max(0, student.totalOwed - currentPaid - student.walletBalance);
+
+    // How much of the payment goes towards clearing arrears
+    const arrearsRemaining = Math.max(0, student.previousArrears - Math.max(0, currentPaid - student.expectedFees + student.previousArrears - student.walletBalance));
+    const paymentClearsArrears = Math.min(t.amount, arrearsRemaining);
+    const newArrears = Math.max(0, student.previousArrears - (currentPaid + t.amount - student.walletBalance));
+
+    // If arrears changed, update the DB column
+    if (newArrears !== student.previousArrears) {
+      await supabase
+        .from("students")
+        .update({ previous_arrears: Math.max(0, newArrears) })
+        .eq("id", student.id);
+
+      setStudents(p => p.map(s =>
+        s.id === student.id
+          ? { ...s,
+              previousArrears: Math.max(0, newArrears),
+              totalOwed: s.expectedFees + Math.max(0, newArrears) }
+          : s
+      ));
+    }
+
+    // If payment exceeds everything owed, put the excess in the wallet
+    if (t.amount > totalStillOwed && totalStillOwed >= 0) {
+      const excess    = t.amount - totalStillOwed;
       const newWallet = student.walletBalance + excess;
 
-      // Update wallet in DB
       await supabase
         .from("students")
         .update({ wallet_balance: newWallet })
         .eq("id", student.id);
 
-      // Update wallet in local state
       setStudents(p => p.map(s =>
         s.id === student.id ? { ...s, walletBalance: newWallet } : s
       ));
 
-      // Insert a system offset row so collected totals stay accurate
+      // Offset row keeps the collected totals accurate
       const { data: offsetData } = await supabase
         .from("transactions")
         .insert({
@@ -525,6 +560,9 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
         newTransactionsToAdd.unshift(txFromRow(offsetData as TransactionRow));
       }
     }
+
+    // Suppress unused variable warning — paymentClearsArrears is used for clarity
+    void paymentClearsArrears;
 
     setTransactions(prev => [...newTransactionsToAdd, ...prev]);
     setReceiptTx(tx);
@@ -682,13 +720,11 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
             const stream     = page.stream;
             const stats      = streamStats.find(s => s.stream === stream)!;
             const classStudents = students.filter(s => s.stream === stream).map(s => {
-  const paid    = transactions.filter(t => t.studentId === s.id).reduce((a, t) => a + t.amount, 0);
-  
-  // Balance calculation uses the wallet credit!
-  const balance = s.expectedFees - paid - s.walletBalance;
-  
+  const paid = transactions.filter(t => t.studentId === s.id && t.amount > 0).reduce((a, t) => a + t.amount, 0);
+  // Balance is against totalOwed (arrears + this year) minus wallet credit
+  const balance = s.totalOwed - paid - s.walletBalance;
   const status: "cleared" | "partial" | "unpaid" =
-    balance <= 0 ? "cleared"
+    balance <= 0           ? "cleared"
     : (paid + s.walletBalance) > 0 ? "partial"
     : "unpaid";
   return { ...s, paid, balance, status };
@@ -715,7 +751,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
                       <tr>
                         <th>#</th><th>Name</th><th>Guardian</th>
                         <th>Type</th>
-                        <th className="num">Expected</th>
+                        <th className="num">Total Owed</th>
                         <th className="num">Paid</th>
                         <th className="num">Balance</th>
                         <th>Status</th><th></th>
@@ -726,10 +762,15 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
                         <tr key={s.id}>
                           <td className="row-num">{i + 1}</td>
                           <td className="name-cell">
-  {s.name}
+  <div>{s.name}</div>
+  {s.previousArrears > 0 && (
+    <span style={{ display:"inline-block", marginTop:"2px", fontSize: "0.68rem", padding: "1px 6px", background: "#fee2e2", color: "#991b1b", borderRadius: "4px" }}>
+      Arrears: {fmt(s.previousArrears)}
+    </span>
+  )}
   {s.walletBalance > 0 && (
-    <span style={{ marginLeft: "8px", fontSize: "0.7rem", padding: "2px 6px", background: "#dcfce7", color: "#166534", borderRadius: "4px" }}>
-      +{fmt(s.walletBalance)} Wallet
+    <span style={{ display:"inline-block", marginTop:"2px", marginLeft:"4px", fontSize: "0.68rem", padding: "1px 6px", background: "#dcfce7", color: "#166534", borderRadius: "4px" }}>
+      Wallet: +{fmt(s.walletBalance)}
     </span>
   )}
 </td>
@@ -739,7 +780,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
     {s.type === 'Boarder' ? "🛏️ Boarder" : s.type === 'Transport' ? "🚌 Transport" : "🚶 Day"}
   </span>
 </td>
-                          <td className="num">{fmt(s.expectedFees)}</td>
+                          <td className="num" title={s.previousArrears > 0 ? `This year: ${fmt(s.expectedFees)} + Arrears: ${fmt(s.previousArrears)}` : ""}>{fmt(s.totalOwed)}</td>
                           <td className="num">{fmt(s.paid)}</td>
                           <td className="num">
                             {s.balance > 0 ? <span className="c-danger">{fmt(s.balance)}</span>
@@ -1669,7 +1710,9 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
           <hr />
           <table><tbody>
             <tr><td>Amount Paid</td><td><span className="amount">{fmt(tx.amount)}</span></td></tr>
-            {student && <tr><td>Annual Fees</td><td>{fmt(student.expectedFees)}</td></tr>}
+            {student && student.previousArrears > 0 && <tr><td>Previous Arrears</td><td style={{color:"#991b1b"}}>{fmt(student.previousArrears)}</td></tr>}
+            {student && <tr><td>This Year Fees</td><td>{fmt(student.expectedFees)}</td></tr>}
+            {student && <tr><td>Total Owed</td><td style={{fontWeight:700}}>{fmt(student.totalOwed)}</td></tr>}
           </tbody></table>
           <p className="footer">Official receipt — retain for your records.<br />Paradise Schols · {CURRENT_TERM.label}</p>
         </div>
