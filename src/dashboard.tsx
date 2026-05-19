@@ -120,31 +120,36 @@ function calculateExpectedFees(
   type: StudentType,
   isNew: boolean,
   globalFees: GlobalFees,
-  enrolledAt?: string // New parameter
+  enrolledAt?: string 
 ): number {
-  // eslint-disable-next-line no-useless-assignment
-  let annualBase = 0;
+  // Look how much cleaner this is! The linter will love it.
+  const annualBase = type === "Boarder"   ? globalFees.boarderBase
+                   : type === "Transport" ? globalFees.transportBase
+                   : globalFees.dayBase;
 
-  // 1. Determine the full annual base
-  if (type === "Boarder")        annualBase = globalFees.boarderBase;
-  else if (type === "Transport") annualBase = globalFees.transportBase;
-  else                           annualBase = globalFees.dayBase;
+  const currentYear = new Date().getFullYear();
+  
+  // Safely grab the year they enrolled
+  const enrollYear = enrolledAt ? parseInt(enrolledAt.split('-')[0], 10) : currentYear;
 
-  // 2. Pro-rata logic
-  // Calculate how many installments they missed. 
-  // If they join in Installment 1, they miss 0. If join in Inst 3, they miss 2.
-  const joinInstallment = enrolledAt ? getInstallmentIndex(enrolledAt) : 1;
-  const installmentsToPay = (4 - joinInstallment) + 1; 
+  // 1. DEFAULT TO FULL YEAR (4 installments)
+  let installmentsToPay = 4; 
+
+  // 2. ONLY pro-rate if they joined THIS YEAR
+  if (enrollYear >= currentYear && enrolledAt) {
+    const joinInstallment = getInstallmentIndex(enrolledAt);
+    installmentsToPay = (4 - joinInstallment) + 1; 
+  }
   
   const perInstallmentRate = annualBase / 4;
   let total = perInstallmentRate * installmentsToPay;
 
-  // 3. Mandatory Add-ons (Library/Caution usually paid in full regardless of when joining)
+  // Mandatory Add-ons
   total += globalFees.library;
   total += globalFees.caution;
 
-  // 4. Tuition (July - only applies if they are enrolled by July/Installment 3)
-  if (joinInstallment <= 3) {
+  // Tuition applies if they pay for at least 2 installments (joined before Sept)
+  if (installmentsToPay >= 2) {
     if (stream === "Class 7") {
       total += globalFees.tuitionBoarder;
     } else if (stream === "Class 4") {
@@ -152,7 +157,6 @@ function calculateExpectedFees(
     }
   }
 
-  // 5. One-off registration fee
   if (isNew) total += globalFees.registration;
 
   return total;
