@@ -364,7 +364,7 @@ if (cancelled) return;
   // ── Mutators ─────────────────────────────────────────────────────────────────
 
   const addStudents = async (
-    newStudents: Array<Omit<Student, "id" | "expectedFees" | "walletBalance"> & { isNew: boolean }>
+    newStudents: Array<Omit<Student, "id" | "expectedFees" | "walletBalance" | "previousArrears" | "totalOwed"> & { isNew: boolean, enrolledAt: string }>
   ) => {
     if (newStudents.length === 0) return;
 
