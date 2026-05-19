@@ -570,7 +570,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
 
     setTransactions(prev => [...newTransactionsToAdd, ...prev]);
     setReceiptTx(tx);
-    toast.success("Payment recorded");
+    
   };
 
   const addUnallocated = async (u: Omit<Unallocated, "id">) => {
