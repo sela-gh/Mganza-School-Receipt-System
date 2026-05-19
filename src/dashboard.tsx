@@ -404,7 +404,7 @@ const { data: classRows, error: classErr } = await supabase
     const { data, error } = await supabase
       .from("students")
       .insert(insertRows)
-      .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, previous_arrears, classes(name), student_term_fees(expected_fee, term_id)");
+      .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, previous_arrears, enrolled_date, classes(name), student_term_fees(expected_fee, term_id)");
     if (error) { toast.error(error.message); return; }
 
     const added = (data ?? []).map(r => {
