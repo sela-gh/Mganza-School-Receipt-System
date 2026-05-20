@@ -287,9 +287,19 @@ const [globalFees, setGlobalFees] = useState<GlobalFees>(DEFAULT_GLOBAL_FEES);
         
         // FIX: Use a local variable to hold the fetched fees so we don't need 
         // to put globalFees in the dependency array below (which caused the infinite loop)
-       let activeFees = DEFAULT_GLOBAL_FEES; // Use the constant, not the state variable!
+let activeFees = DEFAULT_GLOBAL_FEES; 
         if (settings?.global_fees) {
-          activeFees = settings.global_fees;
+          // DEEP MERGE: Safely combines your DB data with missing new fields
+          activeFees = {
+            ...DEFAULT_GLOBAL_FEES,
+            ...settings.global_fees,
+            uniforms: {
+              ...DEFAULT_GLOBAL_FEES.uniforms,
+              ...(settings.global_fees.uniforms || {}),
+              boys: { ...DEFAULT_GLOBAL_FEES.uniforms.boys, ...(settings.global_fees.uniforms?.boys || {}) },
+              girls: { ...DEFAULT_GLOBAL_FEES.uniforms.girls, ...(settings.global_fees.uniforms?.girls || {}) }
+            }
+          };
           setGlobalFees(activeFees);
         }
 
@@ -468,12 +478,53 @@ const { data: classRows, error: classErr } = await supabase
   };
 
 const updateGlobalFees = async (newFees: GlobalFees) => {
+    // 1. Try to find the existing settings row
+    const { data: settingsRow, error: fetchErr } = await supabase
+      .from("settings")
+      .select("id")
+      .maybeSingle();
+
+    if (fetchErr) {
+      toast.error("Database check failed: " + fetchErr.message);
+      return;
+    }
+
+    // 2. If the table is empty, INSERT a new row. If it exists, UPDATE it.
+    if (!settingsRow) {
+      const { error: insertErr } = await supabase
+        .from("settings")
+        .insert([{ global_fees: newFees }]);
+
+      if (insertErr) { 
+        toast.error("Failed to create initial settings: " + insertErr.message); 
+        return; 
+      }
+    } else {
+      const { error: updateErr } = await supabase
+        .from("settings")
+        .update({ global_fees: newFees })
+        .eq("id", settingsRow.id); 
+
+      if (updateErr) { 
+        toast.error("Database Error: " + updateErr.message); 
+        return; 
+      }
+    }
+
+    // 3. Update the UI instantly
     setGlobalFees(newFees);
+    
+    // 4. Recalculate everyone safely
     setStudents(p => p.map(s => {
-      const baseline = calculateExpectedFees(s.stream, s.type, false, newFees);
-      return { ...s, expectedFees: baseline };
+      const baseline = calculateExpectedFees(s.stream, s.type, false, newFees, s.enrolledAt);
+      return { 
+        ...s, 
+        expectedFees: baseline,
+        totalOwed: baseline + s.previousArrears 
+      };
     }));
-    toast.success("Global fees updated!");
+    
+    toast.success("Global fees saved successfully!");
   };
   const recordTx = async (t: Omit<Transaction, "id">) => {
     if (!t.studentId) { toast.error("No student selected"); return; }
@@ -609,8 +660,13 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
   return (
     <div className="app-shell">
       <Toaster richColors position="top-right" />
-      {receiptTx && (
-        <ReceiptModal tx={receiptTx} student={studentLookup[receiptTx.studentId]} onClose={() => setReceiptTx(null)} />
+    {receiptTx && (
+        <ReceiptModal 
+          tx={receiptTx} 
+          student={studentLookup[receiptTx.studentId]} 
+          transactions={transactions} 
+          onClose={() => setReceiptTx(null)} 
+        />
       )}
 
       {/* Mobile header */}
@@ -1667,8 +1723,21 @@ function AllocateInline({ entryId: _entryId, students, onAllocate }: { entryId: 
 }
 
 // ── Receipt Modal (unchanged) ─────────────────────────────────────────────────
-function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Student; onClose: () => void }) {
+function ReceiptModal({ tx, student, transactions, onClose }: { tx: Transaction; student?: Student; transactions: Transaction[]; onClose: () => void }) {
   const ref = useRef<HTMLDivElement>(null);
+  
+  // 1. Calculate the real balance for the receipt!
+  let totalPaid = 0;
+  let currentBalance = 0;
+  
+  if (student) {
+    totalPaid = transactions
+      .filter(t => t.studentId === student.id && t.amount > 0)
+      .reduce((sum, t) => sum + t.amount, 0);
+    
+    currentBalance = student.totalOwed - totalPaid - student.walletBalance;
+  }
+
   const print = () => {
     const html = ref.current?.innerHTML ?? "";
     const w = window.open("", "_blank");
@@ -1679,7 +1748,7 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
       .sub{font-size:0.65rem;letter-spacing:.15em;text-transform:uppercase;color:#888;margin-bottom:1.2rem;}
       table{width:100%;border-collapse:collapse;}
       td{padding:5px 0;font-size:.88rem;}
-      td:first-child{color:#666;width:42%;font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700;}
+      td:first-child{color:#666;width:45%;font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;font-weight:700;}
       .amount{font-size:1.6rem;font-weight:700;color:#1a6b3a;font-family:monospace;}
       hr{border:none;border-top:1px dashed #ccc;margin:12px 0;}
       .footer{font-size:.68rem;color:#aaa;text-align:center;margin-top:1rem;line-height:1.7;}
@@ -1705,20 +1774,38 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
             {student && <tr><td>Student</td><td>{student.name}</td></tr>}
             {student && <tr><td>Class</td><td>{student.stream}</td></tr>}
             {student && <tr><td>Student Type</td><td>{student.type}</td></tr>}
-            {student?.guardian && <tr><td>Guardian</td><td>{student.guardian}</td></tr>}
             <tr><td>Method</td><td>{tx.method}</td></tr>
             {tx.reference && <tr><td>Reference</td><td><span className="mono-cell">{tx.reference}</span></td></tr>}
             <tr><td>Received By</td><td>{tx.receivedBy}</td></tr>
             {tx.notes && <tr><td>Notes</td><td>{tx.notes}</td></tr>}
           </tbody></table>
           <hr />
+          
+          {/* UPDATED MATH TABLE SECTION */}
           <table><tbody>
-            <tr><td>Amount Paid</td><td><span className="amount">{fmt(tx.amount)}</span></td></tr>
-            {student && student.previousArrears > 0 && <tr><td>Previous Arrears</td><td style={{color:"#991b1b"}}>{fmt(student.previousArrears)}</td></tr>}
-            {student && <tr><td>This Year Fees</td><td>{fmt(student.expectedFees)}</td></tr>}
-            {student && <tr><td>Total Owed</td><td style={{fontWeight:700}}>{fmt(student.totalOwed)}</td></tr>}
+            <tr><td>Amount Paid Today</td><td><span className="amount">{fmt(tx.amount)}</span></td></tr>
+            
+            {student && student.previousArrears > 0 && <tr><td>Old Arrears</td><td style={{color:"#991b1b"}}>{fmt(student.previousArrears)}</td></tr>}
+            {student && <tr><td>This Year's Fees</td><td>{fmt(student.expectedFees)}</td></tr>}
+            {student && <tr><td>Total Year Target</td><td>{fmt(student.totalOwed)}</td></tr>}
+            {student && <tr><td>Total Paid to Date</td><td style={{color:"#166534"}}>{fmt(totalPaid)}</td></tr>}
+            
+            {student && (
+              <tr style={{ borderTop: "1px dashed #ccc" }}>
+                <td style={{ paddingTop: "12px", fontWeight: 700, color: "#111" }}>Remaining Balance</td>
+                <td style={{ paddingTop: "12px", fontWeight: 700, fontSize: "1.1rem" }}>
+                  {currentBalance > 0 
+                    ? <span style={{color: "#dc2626"}}>{fmt(currentBalance)}</span>
+                    : currentBalance < 0 
+                      ? <span style={{color: "#166534"}}>Overpaid {fmt(Math.abs(currentBalance))}</span>
+                      : <span style={{color: "#166534"}}>Cleared (0)</span>
+                  }
+                </td>
+              </tr>
+            )}
           </tbody></table>
-          <p className="footer">Official receipt — retain for your records.<br />Paradise Schols · {CURRENT_TERM.label}</p>
+          
+          <p className="footer">Official receipt — retain for your records.<br />Paradise Schools · {CURRENT_TERM.label}</p>
         </div>
         <div className="form-actions">
           <button className="btn-ghost" onClick={onClose}>Close</button>
@@ -1727,7 +1814,6 @@ function ReceiptModal({ tx, student, onClose }: { tx: Transaction; student?: Stu
       </div>
     </div>
   );
-
 }
 // ═══════════════════════════════════════════════════════════════════════════════
 // UNIFORM SALES (POINT OF SALE)
