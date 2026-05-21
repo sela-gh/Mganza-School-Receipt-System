@@ -675,7 +675,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
           <span /><span /><span />
         </button>
         <span className="mobile-title">Paradise Schools</span>
-        <RecordTxBtn students={students} onRecord={recordTx} />
+        <RecordTxBtn students={students} transactions={transactions} onRecord={recordTx} />
       </div>
 
       {sidebarOpen && <div className="sidebar-backdrop" onClick={() => setSidebarOpen(false)} />}
@@ -729,7 +729,7 @@ const updateGlobalFees = async (newFees: GlobalFees) => {
             )}
           </div>
           <div className="topbar-actions">
-            <RecordTxBtn students={students} onRecord={recordTx} />
+           <RecordTxBtn students={students} transactions={transactions} onRecord={recordTx} />
           </div>
         </header>
 
@@ -1118,7 +1118,7 @@ function MethodBadge({ method }: { method: PaymentMethod }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 // RECORD TRANSACTION (unchanged — class-first two-step picker)
 // ═══════════════════════════════════════════════════════════════════════════════
-function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t: Omit<Transaction, "id">) => void }) {
+function RecordTxBtn({ students, transactions, onRecord }: { students: Student[]; transactions: Transaction[]; onRecord: (t: Omit<Transaction, "id">) => void }) {
   const [open, setOpen]                         = useState(false);
   const [selectedStream, setSelectedStream]     = useState<Stream | "">("");
   const [studentId, setStudentId]               = useState("");
@@ -1137,7 +1137,16 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
     return q ? base.filter(s => s.name.toLowerCase().includes(q)) : base;
   }, [students, selectedStream, studentSearch]);
 
-  const pickedStudent = students.find(s => s.id === studentId);
+const pickedStudent = students.find(s => s.id === studentId);
+
+  // Calculate the true remaining balance based on payment history
+  let currentBalance = 0;
+  if (pickedStudent) {
+    const paid = transactions
+      .filter(t => t.studentId === pickedStudent.id && t.amount > 0)
+      .reduce((a, t) => a + t.amount, 0);
+    currentBalance = pickedStudent.totalOwed - paid - pickedStudent.walletBalance;
+  }
 
   const reset = () => {
     setSelectedStream(""); setStudentId(""); setStudentSearch(""); setAmount("");
@@ -1210,7 +1219,7 @@ function RecordTxBtn({ students, onRecord }: { students: Student[]; onRecord: (t
               <div className="step-block">
                 <div className="step-label">
                   <span className="step-num">3</span> Payment Details
-                  {pickedStudent && <span className="step-label-hint">for {pickedStudent.name} · Outstanding {fmt(Math.max(0, pickedStudent.expectedFees - 0))}</span>}
+                  {pickedStudent && <span className="step-label-hint">for {pickedStudent.name} · Outstanding {fmt(Math.max(0, currentBalance))}</span>}
                 </div>
                 <div className="form-grid">
                   <div className="form-field"><label>Date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} /></div>
