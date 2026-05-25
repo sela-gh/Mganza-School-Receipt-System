@@ -438,14 +438,15 @@ const { data: classRows, error: classErr } = await supabase
     if (classErr) { toast.error(classErr.message); return; }
     if (!classRow) { toast.error(`Class "${s.stream}" not found`); return; }
 
-    const { data, error } = await supabase
+   const { data, error } = await supabase
       .from("students")
       .update({ 
         full_name: s.name, 
         class_id: classRow.id, 
         guardian: s.guardian ?? null, 
         parent_phone: s.phone ?? null, 
-        student_type: s.type 
+        student_type: s.type,
+        enrolled_date: s.enrolledAt 
       })
       .eq("id", s.id)
       .select("id, full_name, class_id, guardian, parent_phone, student_type, wallet_balance, previous_arrears, classes(name), student_term_fees(expected_fee, term_id)")
@@ -1584,12 +1585,19 @@ function EditStudentModal({ student, onSave }: { student: Student; onSave: (s: S
   const [name,     setName]     = useState(student.name);
   const [guardian, setGuardian] = useState(student.guardian ?? "");
   const [phone,    setPhone]    = useState(student.phone ?? "");
-  const [fees,     setFees]     = useState(String(student.expectedFees));
   const [type,     setType]     = useState<StudentType>(student.type);
+  const [enrolled, setEnrolled] = useState(student.enrolledAt);
 
   const submit = () => {
-    if (!name.trim() || !Number(fees)) { toast.error("Name and fees required"); return; }
-    onSave({ ...student, name: name.trim(), guardian: guardian.trim() || undefined, phone: phone.trim() || undefined, expectedFees: Number(fees), type });
+    if (!name.trim()) { toast.error("Name required"); return; }
+    onSave({ 
+      ...student, 
+      name: name.trim(), 
+      guardian: guardian.trim() || undefined, 
+      phone: phone.trim() || undefined, 
+      type, 
+      enrolledAt: enrolled 
+    });
     setOpen(false);
   };
 
@@ -1597,7 +1605,7 @@ function EditStudentModal({ student, onSave }: { student: Student; onSave: (s: S
     <>
       <button className="action-btn" onClick={() => {
         setOpen(true); setName(student.name); setGuardian(student.guardian ?? ""); setPhone(student.phone ?? "");
-        setFees(String(student.expectedFees)); setType(student.type);
+        setType(student.type); setEnrolled(student.enrolledAt);
       }}>Edit</button>
       {open && (
         <div className="modal-overlay" onClick={() => setOpen(false)}>
@@ -1618,7 +1626,10 @@ function EditStudentModal({ student, onSave }: { student: Student; onSave: (s: S
                   <option value="Boarder">Boarder</option>
                 </select>
               </div>
-              <div className="form-field form-field--full"><label>Expected Fees (TZS)</label><input type="number" value={fees} onChange={e => setFees(e.target.value)} /></div>
+              <div className="form-field form-field--full">
+                <label>Enrolled Date (Calculates Fees Automatically)</label>
+                <input type="date" className="bulk-input" value={enrolled} onChange={e => setEnrolled(e.target.value)} />
+              </div>
             </div>
             <div className="form-actions">
               <button className="btn-ghost" onClick={() => setOpen(false)}>Cancel</button>
